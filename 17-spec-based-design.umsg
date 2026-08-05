@@ -1,0 +1,303 @@
+%unimsg 0 method/spec-based-design/v0
+
+-- How to design a project in unimsg so that the project derives from it.
+--
+-- Written after a session in which four specifications, six protocol
+-- documents, two applications and a format were all authored this way, and in
+-- which the method failed twice in instructive ways. It is a description of a
+-- practice that works, with its failure modes attached, and not a manifesto.
+--
+-- The claim is narrow. Not that everything should be generated — most things
+-- should not. The claim is that a project has a handful of facts that appear
+-- in several places, and that those facts should exist once, as data, with
+-- every appearance derived. Which facts those are is the judgement; the
+-- mechanism is easy.
+
+spec-based-design @method/spec-based-design/v0 {
+  title  "Designing a project as a unimsg document"
+  status :provisional
+
+  premise "A specification that only describes is a document that can be wrong
+           without anything noticing. A specification that generates cannot be
+           wrong about the thing it generates, because the thing is its output.
+           So the practice is to move facts from prose into data, and then to
+           derive their appearances."
+
+  -- ===================================================================
+  -- THE THREE KINDS OF CONTENT
+  -- ===================================================================
+
+  -- Getting this division right is most of the method. It decides what to
+  -- write as data and what to leave as prose, and it is the judgement the
+  -- mechanism cannot make for you.
+
+  content-kinds [
+    | kind          is                                              belongs
+    | :generative   "a fact that appears somewhere else as well"     "in the document, generated out"
+    | :normative    "a rule an implementation must satisfy"          "in the document, with vectors"
+    | :descriptive  "reasoning, context, why a decision was taken"   "in the document, generated nowhere"
+  ]
+
+  the-test-for-generative "Does this fact appear in more than one place? A
+                           colour that is in a stylesheet and a design note is
+                           two copies of one fact and will diverge. A paragraph
+                           explaining why the palette is quiet appears once and
+                           should stay prose."
+
+  the-test-for-normative "Could an implementation get this wrong? Then it needs
+                          a vector, and the vector needs to pin bytes or values
+                          rather than describe an outcome. A sentence is
+                          satisfied by whatever the reader understood it to
+                          mean — which is not a theory, it is what happened."
+
+  descriptive-is-not-lesser "Most of a good specification is descriptive, and
+                             the reasoning is the part that survives longest.
+                             A decision without its reason cannot be revisited,
+                             only reversed by whoever finds it inconvenient."
+
+  -- ===================================================================
+  -- THE GENERATION PATTERN
+  -- ===================================================================
+
+  pattern {
+    shape [
+      | step  do
+      | 1     "put the fact in the document, as data — a table, not a sentence"
+      | 2     "write a generator that reads the document and emits the artefact"
+      | 3     "run the generator in the build, before anything consumes the artefact"
+      | 4     "give the generator a check mode that fails when the artefact is stale"
+      | 5     "say in the artefact that it is generated, and from where"
+    ]
+
+    why-step-3 "So a hand edit cannot survive a build. Without it the document
+                is a suggestion, and the first time someone edits the artefact
+                directly the two have silently diverged."
+
+    why-step-4 "So a build that cannot run the generator fails loudly rather
+                than proceeding with a stale artefact. A skipped check reads
+                exactly like a passed one."
+
+    why-step-5 "So the next person edits the right file. A generated artefact
+                that does not say so is a trap laid for a colleague."
+
+    worked-examples [
+      | fact                        lives-in                    generated-into        by
+      | "the colour palette"        "a presentation-system block"  "a stylesheet's custom properties"  "a token generator"
+      | "the navigation"            "a shell block"             "the markup of every page"  "a page generator"
+      | "a README"                  "a documentation block"     "README.md"           "a readme generator"
+      | "conformance vectors"       "a conformance block"       "a test suite"        "written by hand from the vectors"
+    ]
+
+    the-last-row-is-honest "Vectors are usually transcribed into tests by hand
+                            rather than generated. That is a weaker link than
+                            the others and worth knowing: a vector nobody
+                            transcribed is a vector nothing checks."
+  }
+
+  -- ===================================================================
+  -- DOCUMENTATION AS DATA
+  -- ===================================================================
+
+  -- The specific case that prompted this document: a README should not be
+  -- written in Markdown. It should be written in unimsg and rendered.
+
+  documentation {
+    why "A README repeats what the project's other documents already say —
+         what it is, what it is for, how to run it, what its limits are. Every
+         repetition is a copy that drifts. Writing it as data means the facts
+         it shares with a specification can be the same facts."
+
+    vocabulary [
+      | key         holds
+      | :title      "the document's heading"
+      | :intro      "prose before the first section; a string, or a sequence of paragraphs"
+      | :sections   "a SEQUENCE of sections, because order carries meaning here"
+      | :heading    "a section's heading"
+      | :body       "prose; a string, or a sequence of paragraphs"
+      | :table      "a sequence of identically-keyed records, rendered as a table"
+      | :code       "a literal block; `text` and an optional `language`"
+    ]
+
+    sections-are-a-sequence-not-a-map "This is the one shape decision that
+                                       matters, and it follows from the
+                                       format. Map keys are sorted
+                                       canonically, so a document whose
+                                       sections were a map would render them
+                                       alphabetically — Status before
+                                       Overview, Limits before Usage. Prose has
+                                       an order and that order is meaning, so
+                                       sections are a sequence."
+
+    the-same-applies-to-tables "A table's columns are map keys and are
+                                therefore sorted on render. Where column order
+                                carries meaning — an identifier, then inputs,
+                                then expected — that is currently lost. It is a
+                                known weakness of the format rather than of
+                                this method."
+  }
+
+  -- ===================================================================
+  -- TWO KINDS OF TOOL
+  -- ===================================================================
+
+  tooling {
+    doc "A tool that reads these documents is either generic or domain-specific,
+         and the two are not points on a scale — they are opposite commitments,
+         and the failure is the middle."
+
+    kinds [
+      | kind              knows                                  refuses
+      | :generic          "structure alone — maps, sequences, record shape"  "to learn any vocabulary"
+      | :domain-specific  "exactly one vocabulary, completely"    "any document not following it"
+    ]
+
+    worked-pair "A presentation surface renders any document at all and has no
+                 per-domain handlers, because the moment it knows about one
+                 domain it is a viewer for that domain rather than a surface
+                 for all of them. A readme generator knows title, intro and
+                 ordered sections, and rejects a document without them rather
+                 than rendering half of one. Both are right; they are answering
+                 different questions."
+
+    the-middle-is-the-mistake "A tool that half-knows a vocabulary produces
+                               plausible output from documents it does not
+                               understand, which is worse than either
+                               commitment. The generic tool would have shown
+                               the structure honestly; the specific tool would
+                               have refused. The half-knowing one shows
+                               something that looks like a README and is not."
+
+    how-to-choose "Ask whether the tool should work on a document it has never
+                   seen. Yes means generic, and it must then act only on
+                   structure. No means domain-specific, and it must then
+                   validate the vocabulary and refuse what does not fit —
+                   because its whole value is that its output can be trusted to
+                   mean something."
+
+    the-same-shape-as-content "This mirrors the altitude argument about
+                               content: a reader can act on what arrives at a
+                               level it already understands. A tool is the same
+                               question asked of the tool — either it acts on
+                               structure, which every document has, or on a
+                               vocabulary, which it must then require."
+  }
+
+  -- ===================================================================
+  -- WHERE THE METHOD FAILS
+  -- ===================================================================
+
+  -- Both of these happened. They are the reason this document is not a
+  -- manifesto.
+
+  failure-modes {
+    describing-what-you-did-not-check {
+      what "Writing a specification section from memory, in the same voice as
+            the sections that were verified, with nothing marking the
+            difference."
+
+      happened "A document about a database protocol was written partly from
+                captured bytes and partly from recall. Read afterwards, the two
+                halves were indistinguishable — and the recalled half is
+                exactly where an implementer would trust it most, because it
+                reads with the same confidence."
+
+      remedy "Mark the provenance of every section. Captured, described,
+              deferred. If a document cannot say which of its claims were
+              checked, it is not a specification, it is an essay about one."
+    }
+
+    prose-that-looks-normative {
+      what "Conformance vectors written as sentences rather than as values."
+
+      happened "A store specification carried twenty-four vectors in prose.
+                Two independent implementations passed all twenty-four and
+                could not read each other's descriptors, because a sentence is
+                satisfied by whatever the reader understood it to mean. Every
+                vector was correct and the suite proved nothing."
+
+      remedy "A vector pins bytes, or a value, or an error. `expect the same
+              result either order` is a description; `expect c045000000000000`
+              is a vector."
+    }
+
+    the-generator-that-guessed {
+      what "Building a tool before the semantics it depends on are decided."
+
+      happened "A reference checker was written before it had been decided
+                whether a reference names an identifier or a path. The tool had
+                to guess, and a guess encoded in a tool becomes a convention by
+                accident."
+
+      remedy "Decide, write it into the specification, then build the tool
+              against the specification. If the decision cannot be made yet,
+              the tool reports categories rather than verdicts."
+    }
+  }
+
+  -- ===================================================================
+  -- WHAT MAKES A DOCUMENT DERIVABLE
+  -- ===================================================================
+
+  derivable {
+    doc "A project derives from its document to the extent that someone could
+         rebuild it with the document and no access to the original. That is a
+         high bar and mostly unreachable; the useful question is which parts
+         clear it."
+
+    measured "An independent implementation built an application from a
+              specification and reproduced twenty-three of twenty-three colour
+              values exactly, two of four button variants, none of three layout
+              measurements, and nothing at all of the behaviour described only
+              in prose. The pattern is not subtle."
+
+    what-transfers [
+      | form                                       outcome
+      | "a table of unambiguous values"            "reproduced exactly"
+      | "a table whose cells are English"          "reproduced in part"
+      | "a value competing with a framework default"  "the framework won"
+      | "prose describing behaviour"               "reinvented or absent"
+    ]
+
+    so "Anything that must come out the same goes in a table as values. Prose
+        is for the reasoning, which is what prose is good at and what tables
+        cannot hold."
+  }
+
+  -- ===================================================================
+  -- ADOPTING IT
+  -- ===================================================================
+
+  adopting {
+    order [
+      | step  do                                                    because
+      | 1     "write the document before the code, for one component"  "the method is only testable when the document comes first"
+      | 2     "move one repeated fact into it and generate its artefact"  "small, reversible, and proves the loop"
+      | 3     "add a check mode and run it in the build"            "otherwise the document is a suggestion"
+      | 4     "mark provenance on every section"                    "so a reader knows what was verified"
+      | 5     "give the normative parts vectors that pin values"    "so an implementation can fail"
+    ]
+
+    do-not [
+      "generate code from the document — generate artefacts that repeat facts,
+       which is a much smaller and much safer claim",
+      "move prose into data because it can be moved; reasoning belongs in
+       prose and loses meaning as a table",
+      "treat the document as authoritative over a running system; where they
+       disagree the system is right and the document has drifted"
+    ]
+
+    the-smallest-useful-version "One document, one generated artefact, one
+                                 check in the build. That is the whole method;
+                                 everything else is more of it."
+  }
+
+  provenance {
+    from "A single session's practice across a serialisation format, a
+          presentation surface, a content-addressed store, an application, and
+          six protocol documents — with the failures recorded above as they
+          occurred rather than reconstructed afterwards."
+
+    status "A practice that held for one project. Whether it holds for a team,
+            or across a year, is untested."
+  }
+}

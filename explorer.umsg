@@ -1,0 +1,480 @@
+%unimsg 0 apps/gitexplorer/v0
+
+-- The git explorer, described as an application you could build.
+--
+-- Written before the application, which is the only arrangement in which the
+-- method is testable at all: a document written afterwards describes what
+-- happened rather than deciding it.
+--
+-- The generative parts of this document — the palette, the status vocabulary,
+-- the layout measurements, the persistence shape — are emitted into
+-- lib/src/generated/tokens.dart by tool/generate_tokens.dart, which the build
+-- runs in check mode. Nothing else here is generated, and most of it is
+-- reasoning, which is what prose is for.
+
+gitexplorer @apps/gitexplorer/v0 {
+  title  "A folder explorer over git repositories"
+  status :provisional
+  reads  -> @systems/git/v0
+  method -> @method/spec-based-design/v0
+
+  premise "A repository is already a tree, and a working tree is already a
+           folder. The application adds one thing: a root that is not on disk,
+           so that repositories which live in unrelated places can be looked
+           at together. Everything else is a rendering of what git_dart
+           returns."
+
+  goal "A git client with a folder-explorer shape, which in time can do what
+        the command line can. Reading came first because nothing else is
+        possible without it, not because writing was out of scope."
+
+  a-correction-to-this-document "Earlier versions of this section listed
+        committing, staging, merging and pushing as non-goals, and gave
+        reasons. Those reasons were invented here rather than asked for, and
+        they were wrong: the restriction was never a requirement, and a
+        specification that quietly narrows what was asked for is a worse
+        failure than one that is incomplete. What survives from them is
+        narrower and is kept below as `care`: an action that can destroy work
+        should be reversible, or confirmed, or both — which is a statement
+        about how an action is offered, and never a reason not to offer it."
+
+  care [
+    | property        means
+    | :reversible     "git can get it back — a commit, a stage, an edit to a tracked file"
+    | :confirmed      "the user is asked first, and the dialog says what will happen"
+    | :reported       "what was done is shown afterwards, by name"
+  ]
+
+  -- ===================================================================
+  -- THE VIRTUAL ROOT
+  -- ===================================================================
+
+  virtual-root {
+    what "The top of the tree is a list the user assembles, not a directory.
+          A repository is added by picking it from anywhere on disk, and the
+          list is what persists between sessions."
+
+    why "A parent folder is the wrong unit. Repositories are not kept in one
+         place — they are wherever they were cloned — and an explorer rooted
+         at a real directory can only ever show the accident of where things
+         landed. Rooting at a list the user maintains makes the tree mean
+         something the filesystem does not record."
+
+    consequence "There is no filesystem walk at the top level and so no
+                 scanning, no watching a parent directory, and no discovery
+                 step that could be slow or wrong. The cost is that a
+                 repository must be added before it can be seen, which is the
+                 correct cost: it is the user saying what they care about."
+
+    levels [
+      | depth  holds                              opened-by
+      | 0      "the list of repositories"         "adding one from disk"
+      | 1      "one repository's directories"     "expanding it"
+      | 2      "files and directories, nested"    "expanding a directory"
+      | :leaf  "one file, at one revision"        "selecting it"
+    ]
+  }
+
+  -- ===================================================================
+  -- WHAT A ROW SHOWS
+  -- ===================================================================
+
+  -- Generative: these names are the enum in the application and the keys of
+  -- the persisted state, and would otherwise be written three times.
+
+  entry-kinds [
+    | kind          is                                    expands
+    | :repository   "a repository the user added"         true
+    | :directory    "a tree, or a directory on disk"      true
+    | :file         "a blob, or a file on disk"           false
+    | :submodule    "a commit belonging to another store" false
+  ]
+
+  status-vocabulary [
+    | state       code  meaning                                     shown
+    | :clean      ""    "matches the index and HEAD"                false
+    | :modified   "M"   "differs from the index"                    true
+    | :added      "A"   "in the index, not in HEAD"                 true
+    | :deleted    "D"   "gone from the working tree"                true
+    | :renamed    "R"   "the same content under a new path"         true
+    | :typechange "T"   "file, symlink, submodule or directory swapped"  true
+    | :untracked  "?"   "in neither the index nor HEAD"             true
+    | :conflicted "U"   "more than one stage in the index"          true
+    | :ignored    "!"   "matched by an ignore rule"                 false
+  ]
+
+  status-is-not-a-file-property "A file's state is a comparison, not an
+                                 attribute, and the comparison has two halves —
+                                 HEAD against the index, and the index against
+                                 the working tree. A row shows the worse of the
+                                 two and the detail pane shows both, because a
+                                 single letter cannot say `staged one way and
+                                 modified again since` and pretending otherwise
+                                 is how a staging area becomes confusing."
+
+  -- ===================================================================
+  -- A FOLDER THAT HOLDS NO REPOSITORY
+  -- ===================================================================
+
+  initialising {
+    what "Choosing a folder with no repository in it offers to create one.
+          Declining adds nothing, because a row that can only report a failure
+          is not worth the space it takes."
+
+    why "The first version added the folder anyway and marked it with an error
+         icon, which is the worst of both answers: it tells the user something
+         is wrong, does not say what would fix it, and leaves a permanent row
+         they must now remove by hand. A folder with no repository in it is not
+         a failure — it is the ordinary state of a folder, and the only useful
+         thing to do about it is offer the one action that changes it."
+
+    nothing-existed-to-lose "Creating a repository writes no objects and moves
+         no ref that was there before, so it is the one write here that cannot
+         go wrong in a way anyone would want back. It would need no
+         confirmation for that reason, and is confirmed anyway, because the
+         folder was chosen with a click and a click can be a mistake."
+
+    -- Generative: the reason appears in the worker, in the row, in the detail
+    -- pane and in the dialog's wording.
+    unavailable-reasons [
+      | reason            says                                  offers-initialising
+      | :missing          "the folder is not there"             false
+      | :not-a-repository "the folder holds no repository yet"  true
+      | :unreadable       "the repository could not be read"    false
+    ]
+
+    only-not-a-repository-is-offered "A missing folder cannot be initialised
+         because there is nowhere to write, and an unreadable repository must
+         not be, because initialising over a repository that exists but failed
+         to open would be destroying something on the strength of not
+         understanding it."
+
+    a-folder-inside-a-repository-is-never-offered "Repository discovery walks
+         upwards, so choosing a subdirectory of a repository finds that
+         repository and adds it. Nothing is offered, and nothing nested is
+         created — which is the right answer, since a repository inside a
+         repository is almost always a mistake and never one made on purpose
+         through a file picker."
+
+    default-branch "init.defaultBranch from the user's own git config, and
+                    `main` when it is unset. Taken from the user's
+                    configuration rather than fixed here, so that a repository
+                    this application creates is the one their git would have
+                    created."
+
+    what-is-written [
+      | path            holds
+      | "HEAD"          "a symbolic ref at the default branch"
+      | "config"        "the repository format version and the bare flag"
+      | "objects/"      "empty, with info and pack beneath it"
+      | "refs/"         "empty, with heads and tags beneath it"
+    ]
+
+    nothing-is-staged "The new repository has no commit and no index, which is
+                       what `git init` leaves too. The explorer cannot make the
+                       first commit, and says so rather than appearing to."
+  }
+
+  -- ===================================================================
+  -- REVISIONS
+  -- ===================================================================
+
+  revisions {
+    doc "Every view of a repository is at a revision. The working tree is one
+         of the choices rather than the only one, which is what makes this an
+         explorer of a repository rather than of a folder."
+
+    choices [
+      | choice        shows                                   status-column  editable
+      | :working-tree "the files on disk"                     true           true
+      | :head         "the tree HEAD points at"               false          false
+      | :branch       "the tree at a branch's tip"            false          false
+      | :commit       "the tree at any commit"                false          false
+    ]
+
+    only-the-working-tree-is-editable "The other three are views of objects,
+                                       and an object cannot be edited — it can
+                                       only be replaced by a different object
+                                       with a different name. Offering an
+                                       editor over a commit would be offering
+                                       to rewrite history while appearing to
+                                       fix a typo."
+
+    only-the-working-tree-has-status "A historical tree is not compared with
+                                      anything, so there is nothing to colour.
+                                      Showing a status column against a commit
+                                      would invite the reading that a file was
+                                      modified *in* that commit, which is a
+                                      different question — that one is answered
+                                      by the change list of the commit itself."
+  }
+
+  -- ===================================================================
+  -- EDITING THE WORKING TREE
+  -- ===================================================================
+
+  editing {
+    what "A file open at the working tree can be edited and saved, and a
+          directory can be given a new file or a new folder."
+
+    the-working-tree-is-not-the-repository "Editing a file changes something git
+         has not recorded and makes no claim about, which is why git reports it
+         as a change rather than as damage. For a tracked file the previous
+         content is still in the object store, so the edit is reversible by
+         every means git offers — it is `reversible` in the sense of `care`
+         above, and needs no confirmation."
+
+    offered [
+      | action          on                          writes
+      | :edit           "a file at the working tree"  "the file's new contents"
+      | :new-file       "a directory"                 "an empty file"
+      | :new-folder     "a directory"                 "an empty directory"
+    ]
+
+    not-yet-built [
+      | action     how-it-should-arrive
+      | :delete    "confirmed, and saying whether git could get it back"
+      | :rename    "confirmed, and staged as a rename so git sees it as one"
+      | :move      "the same as rename"
+    ]
+
+    deleting-needs-a-confirmation-not-a-refusal "Deleting an untracked file
+         destroys the only copy, so it is the one action here that git cannot
+         undo. That is a reason for the dialog to say so — `this file is not in
+         git; deleting it cannot be undone` — and not a reason to withhold the
+         action."
+
+    a-changed-file-opens-on-the-file "Before there was an editor, a changed file
+         opened on its diff, which was the most informative thing to show. Now
+         that the file can be acted on, it opens on the file and the diff is one
+         click away — showing the diff first would put a reader one click from
+         the only thing they can change, every time."
+
+    a-stale-write-is-refused "A save carries the size and timestamp the file had
+         when it was opened, and is refused when they no longer match. Something
+         else wrote to the file — another editor, a build, a checkout — and
+         overwriting it would discard that silently. The user is told, and can
+         reload and try again."
+
+    unsaved-edits-survive-navigation "An edit that has not been saved is kept
+         when the selection moves elsewhere and restored on return, and the
+         file is marked as unsaved meanwhile. The alternative is losing work to
+         a stray click, which is not a trade worth making for simpler code."
+
+    directories-are-created-in-full "A new folder creates every directory on the
+         way to it, so `a/b/c` is one action rather than three. Git does not
+         record directories at all — only paths — so an empty one is invisible
+         to it until something is put inside, and the explorer says so rather
+         than letting the user wonder why nothing changed."
+  }
+
+  -- ===================================================================
+  -- STAGING AND COMMITTING
+  -- ===================================================================
+
+  committing {
+    what "A path can be staged and unstaged, and what is staged can be
+          committed. The staging area is shown as what it is — a third thing
+          between HEAD and the working tree — rather than hidden behind a
+          checkbox."
+
+    the-commit-box-is-pinned "The message field and the commit button sit in a
+         fixed footer, not at the end of the list of changes. In the first
+         version they were the last thing in a scrolling panel, which meant a
+         repository with a hundred changed files hid the one control the panel
+         exists for. A control that scrolls out of sight is a control most
+         users will never find."
+
+    why-the-index-is-shown "Every other tool that hides the index ends up
+         explaining it anyway, in worse words, after a user has been surprised
+         by it. A file can be staged one way and modified again since, and the
+         only honest presentation of that is two lists with the same file in
+         both."
+
+    actions [
+      | action    on                              does
+      | :stage    "a path with unstaged changes"  "writes the working-tree content as a blob and updates the index entry"
+      | :unstage  "a path with staged changes"    "puts the HEAD version back in the index, or removes the entry when HEAD has none"
+      | :commit   "the staged tree"               "writes a tree, a commit, and moves the current branch"
+    ]
+
+    staging-a-deletion "A path staged while it is missing from the working tree
+         stages its deletion, which is what `git add` on a deleted file does.
+         Nothing separate is needed, and offering a separate action would
+         suggest there were two operations where git has one."
+
+    identity-comes-from-the-config "`user.name` and `user.email`, read from the
+         repository, the user and the machine in git's order. A commit with no
+         identity is refused rather than invented — git refuses too, and a
+         commit attributed to a guess is worse than one that did not happen."
+
+    refused [
+      | when                         because
+      | "the index has conflicts"    "there is no single tree to write while a path has more than one stage"
+      | "nothing is staged"          "an empty commit is almost always a mistake, and git refuses it by default too"
+      | "no identity is configured"  "a commit attributed to a guess is worse than one that did not happen"
+    ]
+
+    the-first-commit "A repository with no commit yet has an unborn HEAD: the
+         commit is written with no parent and the branch is created pointing at
+         it. Nothing about this is special-cased beyond leaving the parent list
+         empty, which is what a root commit is."
+
+    what-is-not-done-here "The reflog is not written. Git writes one on every
+         ref update, and a repository this application commits to will have a
+         gap in `git reflog` where those commits are. That is a real defect
+         rather than a decision, and it is recorded here so it is not
+         discovered later as a surprise."
+  }
+
+  -- ===================================================================
+  -- PRESENTATION
+  -- ===================================================================
+
+  presentation {
+    doc "The window is stock Material. There is no palette, no metric table and
+         no type scale here, and there should not be: an application that
+         redefines those is one that has to maintain them, and it stops looking
+         like every other application on the machine.
+
+         An earlier version of this document carried twelve colours, seven
+         measurements and a four-step type scale, all generated into Dart. The
+         result looked hand-rolled rather than deliberate, which is the honest
+         outcome of putting a designer's job into a table and having no
+         designer. Material has resting sizes, a colour scheme with semantic
+         roles and a type scale already; the application uses them."
+
+    what-is-left-here "Only the theme choice, which is behaviour rather than
+         appearance: whether the window follows the platform or is pinned to
+         light or dark."
+
+    theme-choices [
+      | choice   follows
+      | :system  "whatever the platform says"
+      | :light   "the light scheme, always"
+      | :dark    "the dark scheme, always"
+    ]
+
+    the-platform-is-a-default-not-a-verdict "Following the system theme is the
+         right default and the wrong only option. The platform knows the time
+         of day and the user's general preference; it does not know that this
+         window is being read in direct sunlight right now."
+
+    status-colour "The status letters need to be distinguishable from each
+         other, which is the one thing Material's scheme does not decide. They
+         are taken from Material's own swatches, chosen for the current
+         brightness, rather than from values invented here."
+  }
+  -- ===================================================================
+  -- CONCURRENCY
+  -- ===================================================================
+
+  concurrency {
+    doc "git_dart is synchronous and its calls are file reads and inflates.
+         Every one of them happens in a worker isolate, and the interface
+         between the two is messages carrying plain data."
+
+    why-a-worker-and-not-a-call-per-operation "An isolate spawned per call
+         would reopen the repository each time, which means reading every pack
+         index again — on a large repository that is most of the cost of the
+         operation. One long-lived worker keeps the open repositories and
+         answers questions about them."
+
+    rule "Nothing that holds a file handle crosses the boundary. The worker
+          sends records of strings, numbers and byte lists; the interface never
+          exposes a Repository, and so can never be made to leak one."
+
+    what-blocks "Opening a repository the first time, and hashing a working
+                 tree during a status. Both are reported as a pending state
+                 rather than hidden behind a spinner that says nothing."
+  }
+
+  -- ===================================================================
+  -- PERSISTENCE
+  -- ===================================================================
+
+  -- Normative: the on-disk shape of what the application remembers, with a
+  -- vector, so that a reader written against this document and the application
+  -- agree rather than merely both working.
+
+  persistence {
+    file "repositories.json in the application support directory"
+
+    holds [
+      | key           is                                  why
+      | :version      "the format version, an integer"    "so a later shape can be recognised rather than guessed"
+      | :repositories "a sequence of entries, in the user's order"  "order is the user's arrangement and is meaning"
+      | :path         "the working tree path, absolute"   "what was picked"
+      | :name         "the display name"                  "renameable, since a folder name is often not the project's"
+      | :theme        "one of the theme choices"          "a window that is unreadable in the light it is being read in must stay fixed once fixed"
+    ]
+
+    version 1
+
+    vector "{\"version\":1,\"repositories\":[{\"path\":\"C:\\\\dev\\\\flutter\",\"name\":\"flutter\"}],\"theme\":\"system\"}"
+
+    an-unknown-key-is-ignored "A key this build does not know is skipped rather
+                               than refused, which is what lets a key be added
+                               — as `theme` was — without a version bump. The
+                               version guards a change of shape, not an
+                               addition to it, and an absent key takes its
+                               default."
+
+    a-missing-repository-is-kept "A path that no longer exists stays in the
+                                  list, shown as unavailable. Removing it
+                                  silently would lose the user's arrangement
+                                  because a drive was not mounted, and the
+                                  arrangement is the only thing here that is
+                                  not derivable from disk."
+  }
+
+  -- ===================================================================
+  -- WHAT IS BUILT, AND WHAT IS NEXT
+  -- ===================================================================
+
+  built [
+    | action                                          state
+    | "browse a repository at any revision"           :done
+    | "diff, status and history"                      :done
+    | "edit the working tree, add files and folders"  :done
+    | "create a repository"                           :done
+    | "stage and unstage"                             :done
+    | "commit"                                        :done
+    | "delete, rename and move"                       :next
+    | "branch, checkout and merge"                    :planned
+    | "fetch, pull and push"                          :blocked
+  ]
+
+  the-last-row-is-a-library-limit "Everything above the last row is possible
+                    today, because git_dart implements the object layer, the
+                    index and refs. Fetch and push need the transfer protocols,
+                    which that library describes and does not yet implement, so
+                    the application cannot offer them however much it would
+                    like to. That is a real limit with a known cure, and not a
+                    decision about scope."
+
+  what-it-is "A git client shaped like a folder explorer. The shape is the
+              contribution: the command line is better at almost everything
+              here, and worse at showing many repositories, at any revision,
+              next to what has changed."
+  -- ===================================================================
+  -- PROVENANCE
+  -- ===================================================================
+
+  provenance {
+    written-before-the-code true
+
+    generated-from-this-document [
+      | artefact                          by
+      | "lib/src/generated/tokens.dart"   "tool/generate_tokens.dart"
+    ]
+
+    checked-in-the-build "dart run tool/generate_tokens.dart --check fails when
+                          the artefact does not match this document, so a hand
+                          edit to the generated file cannot survive."
+
+    not-generated "Everything else. The widgets, the isolate protocol and the
+                   models are written by hand against this document, which is
+                   the smaller and safer claim the method recommends."
+  }
+}

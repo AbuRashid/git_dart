@@ -1,0 +1,400 @@
+%unimsg 0 systems/git/v0
+
+-- Git, described as a system you could build.
+--
+-- Written for someone implementing git in a language that has none. It
+-- describes formats and algorithms, which is what interoperability requires
+-- and what git's own technical documentation exists to make possible: several
+-- independent implementations already exist because these formats are public.
+-- No source is reproduced here and none is needed — a byte layout and a hash
+-- rule are enough.
+--
+-- Every byte-level claim in the vectors was produced by running git 2.53.0 and
+-- reading what it wrote, not recalled. Where something is described rather
+-- than pinned, the scope block says so. That distinction matters more here
+-- than usual: git is large, and a document that blurred what it had checked
+-- against what it remembered would be most wrong exactly where an implementer
+-- would trust it most.
+
+git @systems/git/v0 {
+  title  "The git object system, storage, refs, index and transfer"
+  status :provisional
+  verified-against "git 2.53.0"
+
+  premise "Git is a content-addressed object store with four object kinds, a
+           mutable pointer namespace over it, and a protocol for moving objects
+           between copies. Everything else — branches, merges, staging, the
+           whole command surface — is built from those three things and is
+           policy rather than mechanism."
+
+  -- ===================================================================
+  -- SCOPE
+  -- ===================================================================
+
+  scope {
+    pinned "The object model, the loose object encoding, the four object
+            formats, the index file, ref storage, and pkt-line framing. Each
+            has vectors below produced by running git."
+
+    described "Packfiles and their index, delta encoding, the wire protocols,
+               and the merge and diff algorithms. Structure and vocabulary,
+               enough to know what you are building and in what order, without
+               byte-level vectors."
+
+    deferred [
+      "the SHA-256 object format, which is the same system with a different
+       hash and 32-byte object names",
+      "worktrees, submodules, sparse checkout, partial clone, bitmaps",
+      "the reftable backend",
+      "signing, notes, replace objects, and the commit-graph cache"
+    ]
+
+    the-honest-shape "You can build something that reads and writes real
+                      repositories from the pinned section alone. You cannot
+                      clone from a server without the described section, and
+                      you cannot be fast without packs."
+  }
+
+  -- ===================================================================
+  -- OBJECTS
+  -- ===================================================================
+
+  objects {
+    doc "Four kinds. Every one is addressed by the hash of its own serialised
+         form, which makes the store content-addressed: identical content has
+         one name, and a name cannot be forged into meaning something else."
+
+    kinds [
+      | kind     holds                                        references
+      | :blob    "file contents, uninterpreted"               "nothing"
+      | :tree    "one directory listing"                      "blobs and trees"
+      | :commit  "one tree, its parents, and who and when"    "a tree and zero or more commits"
+      | :tag     "an annotated pointer to any object"         "one object"
+  ]
+
+    serialised-form {
+      rule "The header is the kind's name, a space, the content length in
+            ASCII decimal, and a NUL. The content follows immediately. The
+            object's name is the SHA-1 of the header and content together."
+
+      note "The hash is over the *uncompressed* bytes. Compression is a storage
+            decision and does not affect identity — which is why the same
+            object is the same name whether it sits loose or in a pack."
+    }
+
+    modes-in-a-tree [
+      | mode      means
+      | "100644"  "a regular file"
+      | "100755"  "an executable file"
+      | "120000"  "a symbolic link; the blob holds the target path"
+      | "040000"  "a subdirectory, referring to a tree"
+      | "160000"  "a submodule commit, referring to a commit not stored here"
+  ]
+
+    tree-entry "The mode in ASCII with no leading zero, a space, the name, a
+                NUL, then the object name as twenty raw bytes — not hex. The
+                raw-bytes detail is the one most often got wrong on a first
+                implementation, because everything else about git speaks hex."
+
+    tree-ordering "Entries are sorted by name, with a directory sorted as
+                   though its name ended in a slash. Get this wrong and your
+                   trees hash differently from git's while containing the same
+                   files, which is a divergence nothing will report."
+
+    commit-format "Lines of `key value` — `tree`, then zero or more `parent`,
+                   then `author` and `committer` — a blank line, then the
+                   message. A merge commit is simply one with more than one
+                   parent, and the order of parents is meaningful: the first is
+                   the branch merged into."
+
+    identity-line "A name, the address in angle brackets, then seconds since
+                   the epoch and a timezone offset like +0000. Two commits with
+                   identical content and different timestamps are different
+                   objects, which is why a rebuild is not reproducible unless
+                   the dates are fixed."
+  }
+
+  -- ===================================================================
+  -- STORAGE
+  -- ===================================================================
+
+  storage {
+    loose {
+      path "objects/ab/cdef… — the first two hex characters of the name are the
+            directory, the remaining thirty-eight are the file"
+      encoding :zlib-deflate
+      why-split "A single directory holding every object is slow on many
+                 filesystems. The split is a filesystem accommodation and
+                 carries no meaning."
+    }
+
+    packed {
+      what "Many objects in one file, some stored as deltas against another
+            object in the same pack, with a companion index for lookup."
+      pack-header "The four bytes PACK, a version as a big-endian 32-bit
+                   integer, and the object count. The file ends with the hash
+                   of everything before it."
+      index-header "A four-byte magic of ff 74 4f 63, then a version."
+      delta-kinds [
+        | kind        "base is named by"
+        | :ofs-delta  "a backward offset within this same pack"
+        | :ref-delta  "the base object's full name, which may be outside the pack"
+  ]
+      order-of-work "Read the header, then objects in order; a delta cannot be
+                     materialised until its base is, so a reader either
+                     resolves recursively or makes two passes."
+    }
+
+    both-are-the-same-store "An object's name does not say where it lives. A
+                             reader looks loose first or packed first as it
+                             pleases; an implementation that exposed the
+                             difference to callers has leaked a storage
+                             decision into its interface."
+  }
+
+  -- ===================================================================
+  -- REFS
+  -- ===================================================================
+
+  refs {
+    doc "The only mutable state. Objects never change; a branch moves. Every
+         command that appears to modify history writes new objects and moves a
+         ref."
+
+    forms [
+      | form         is                                          example
+      | :loose       "a file holding one object name and a newline"  "refs/heads/main"
+      | :packed      "many refs in one file, packed-refs"            ""
+      | :symbolic    "a file holding `ref: ` and another ref's path" "HEAD"
+  ]
+
+    head "HEAD is normally symbolic and names the checked-out branch. Detached
+          HEAD is the same file holding an object name directly, which is why
+          the state needs no separate flag."
+
+    reflog "An append-only log per ref of old name, new name, who, when and
+            why. Not required to read a repository, and required to be a
+            pleasant one — it is what makes a lost commit findable."
+
+    update-must-be-atomic "A ref moves by writing a temporary file and renaming
+                           it over the old one. A torn write here loses a
+                           branch, and rename is the only widely available
+                           atomic primitive."
+  }
+
+  -- ===================================================================
+  -- THE INDEX
+  -- ===================================================================
+
+  index {
+    what "The staging area, and also a cache of the working tree's state so
+          that status need not hash every file."
+
+    file-header "The four bytes DIRC, a version, and an entry count, all
+                 big-endian."
+
+    entry "Ten 32-bit fields — two timestamps with nanoseconds, device, inode,
+           mode, uid, gid and size — then the object name as twenty raw bytes,
+           then a sixteen-bit flags field whose low twelve bits hold the path
+           length, then the NUL-terminated path. Entries are padded so each
+           starts on an eight-byte boundary, and are sorted by path."
+
+    the-stat-fields-are-a-cache "They exist so that a file whose stat data is
+                                 unchanged need not be read. An implementation
+                                 may write zeros into them and remain correct,
+                                 and will be slow. This is the clearest case in
+                                 git of a field that is an optimisation rather
+                                 than a fact."
+
+    stages "The flags field also carries a merge stage. Zero is the ordinary
+            case; one, two and three hold the base, ours and theirs during an
+            unresolved conflict, which is how a conflicted file is represented
+            without a separate file."
+  }
+
+  -- ===================================================================
+  -- TRANSFER
+  -- ===================================================================
+
+  transfer {
+    pkt-line {
+      rule "Every message is preceded by its length as four hexadecimal
+            characters, and that length counts the four characters themselves.
+            So a payload of fifteen bytes is announced as 0013."
+      special [
+        | packet  name         means
+        | "0000"  :flush       "end of a section"
+        | "0001"  :delimiter   "a boundary within a section, protocol v2"
+        | "0002"  :response    "end of a response, protocol v2"
+  ]
+      why "A self-delimiting framing over a stream, so a reader never needs to
+           know a message's length in advance and the same framing works over
+           a pipe, a socket and HTTP."
+    }
+
+    advertisement "A server lists each ref as its object name, a space and the
+                   ref's path. The first line carries the server's capabilities
+                   after a NUL, which is invisible to a careless reader and is
+                   how capability negotiation is bootstrapped."
+
+    negotiation "The client says which objects it wants and which it already
+                 has; the server replies with a pack containing the difference.
+                 Doing this well is the difference between a clone that sends
+                 the repository and one that sends what is missing."
+
+    two-protocols "Version 0 grew capabilities onto the advertisement. Version
+                   2 is command-oriented and lets a client ask for refs without
+                   receiving all of them, which matters on repositories with
+                   very many. Build v0 first; it is smaller and every server
+                   still speaks it."
+  }
+
+  -- ===================================================================
+  -- ALGORITHMS
+  -- ===================================================================
+
+  algorithms {
+    reachability "Almost every question git answers is a graph walk from a set
+                  of refs. What is unreachable is garbage; what is reachable
+                  from one ref and not another is what a push must send."
+
+    merge-base "The best common ancestor of two commits. Needed before a merge
+                or a rebase can begin, and the subtlety is that there may be
+                more than one, which is what makes some merges genuinely
+                ambiguous rather than merely difficult."
+
+    three-way-merge "Compare each side against the merge base rather than
+                     against each other. A side that did not move takes the
+                     other's change with no conflict; both moving is a genuine
+                     clash. Comparing the two sides alone cannot distinguish
+                     these, which is the mistake every hand-rolled merge makes
+                     first."
+
+    diff "Not stored. Git keeps whole objects and computes differences on
+          demand, which is why a rename is not recorded but detected — by
+          similarity, after the fact, and heuristically."
+
+    build-order [
+      | step  build                              because
+      | 1     "hashing and the loose object"     "nothing else exists without an object name"
+      | 2     "the four object formats"          "reading a repository is now possible"
+      | 3     "refs and HEAD"                    "a repository becomes navigable"
+      | 4     "the index and checkout"           "a working tree becomes possible"
+      | 5     "commit"                           "writing history, not just reading it"
+      | 6     "packfile reading"                 "real repositories are packed; without this you can read almost none"
+      | 7     "the walk, merge-base, merge"      "branching becomes usable"
+      | 8     "pkt-line and fetch"               "a second copy becomes possible"
+      | 9     "packfile writing"                 "pushing, and repositories that do not grow without bound"
+  ]
+
+    where-people-stop "Most reimplementations reach step five and stall at six,
+                       because a packfile is the first part that cannot be
+                       understood by reading a hex dump and guessing."
+  }
+
+  -- ===================================================================
+  -- VECTORS
+  -- ===================================================================
+
+  -- Produced by running git 2.53.0 and reading the bytes it wrote. An
+  -- implementation that reproduces these is interoperable at the object layer,
+  -- which is the layer everything else rests on.
+
+  vectors {
+    hashing [
+      | id      content            object-bytes                     name
+      | :g-001  "(empty)"          "blob 0 NUL"                     "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+      | :g-002  "hello and a newline"  "blob 6 NUL hello NL"        "ce013625030ba8dba906f756967f9e9ca394464a"
+  ]
+
+    the-header-is-hashed "g-001 is the hash of the twelve bytes `blob 0` NUL
+                          and nothing else — not of the empty string. An
+                          implementation that hashes content alone produces
+                          plausible names for every object and interoperates
+                          with nothing."
+
+    tree [
+      | id      contains                                 serialised                                    name
+      | :g-010  "one entry, a.txt at mode 100644"        "100644 SP a.txt NUL then 20 raw bytes"       "2e81171448eb9f2ee3821e3d447aa6b2fe3ddba1"
+  ]
+
+    tree-note "The twenty bytes are the blob's name from g-002 in binary, not
+               its forty hex characters. The whole object is 33 content bytes,
+               so its header reads `tree 33`."
+
+    commit [
+      | id      tree-and-metadata                                              name
+      | :g-020  "tree g-010, no parent, author and committer A <a@x> at 1000000000 +0000, message m"  "981748c86e10e9a3e606453d42b267901a9cc923"
+  ]
+
+    commit-note "Content is 116 bytes: the tree line, the author line, the
+                 committer line, a blank line, then the message with a trailing
+                 newline. Reproducing this exact name requires fixing both
+                 timestamps — which is also how a build is made reproducible."
+
+    index [
+      | id      field           observed
+      | :g-030  "signature"     "DIRC"
+      | :g-031  "version"       "2"
+      | :g-032  "entry mode"    "100644 as an octal value in a 32-bit field"
+      | :g-033  "name length"   "in the low twelve bits of the flags field"
+  ]
+
+    framing [
+      | id      packet-on-the-wire                       decodes-to
+      | :g-040  "0113 then 275 bytes"                    "a 275-byte advertisement line"
+      | :g-041  "0000"                                   "flush"
+  ]
+
+    framing-note "0113 is hexadecimal 275, and the four length characters are
+                  counted in it. A reader that adds four to the length reads
+                  four bytes into the next packet, and the stream desynchronises
+                  in a way that first appears much later."
+  }
+
+  -- ===================================================================
+  -- WHAT WILL BITE
+  -- ===================================================================
+
+  hazards [
+    | hazard                                              consequence
+    | "hashing content without the header"                "every name is wrong; nothing interoperates"
+    | "storing tree object names as hex"                  "trees hash differently while looking correct"
+    | "sorting tree entries as plain strings"             "directories sort wrongly; silent divergence"
+    | "counting the pkt-line length excluding its own four characters"  "the stream desynchronises later, far from the cause"
+    | "treating the index stat fields as authoritative"   "a changed file is missed because its stat data matched"
+    | "comparing two sides of a merge without the base"   "changes one side never made are reported as conflicts"
+    | "assuming one merge base"                           "some merges are silently resolved the wrong way"
+  ]
+
+  -- ===================================================================
+  -- PROVENANCE
+  -- ===================================================================
+
+  provenance {
+    byte-level-claims "Produced by running git 2.53.0 in a scratch repository
+                       and decompressing what it wrote. The names in the
+                       vectors are git's own output, not computed by hand and
+                       not recalled."
+
+    described-sections "Packfiles, deltas, the wire protocols and the merge and
+                        diff algorithms are described from general knowledge of
+                        the system and are not pinned by vectors here. They are
+                        the parts most likely to contain an error, and an
+                        implementer should treat them as orientation and check
+                        the format's own technical documentation before
+                        writing them."
+
+    why-that-split "Stated because the alternative is worse. A document that
+                    presented checked and remembered material in the same voice
+                    would be most confidently wrong exactly where an
+                    implementer would trust it most, and there would be no way
+                    to tell from the inside which was which."
+
+    not-a-reproduction "This describes formats and behaviour so that an
+                        independent implementation is possible. It contains no
+                        source from any implementation, which is why several
+                        independent implementations of these formats already
+                        exist."
+  }
+}

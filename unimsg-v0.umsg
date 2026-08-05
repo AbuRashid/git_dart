@@ -1,0 +1,516 @@
+%unimsg 0 spec/unimsg/v0
+
+-- The unimsg v0 specification, written in unimsg.
+--
+-- Self-hosting is not a stunt here. The format claims that its own rules are
+-- expressible as data, and a specification that cannot be written in the thing
+-- it specifies has not earned that claim.
+--
+-- This document is sufficient to implement a parser and a canonical encoder
+-- without any other material. Where it is not, that is a defect in this file.
+
+spec @unimsg/v0 {
+  title   "unimsg v0 — text syntax and canonical encoding"
+  status  :provisional
+  base    "RFC 8949 (CBOR)"
+  doc     "A human text syntax for CBOR with degradable extensions. The text
+           form is a lossless projection of the binary form: text -> CBOR ->
+           text -> CBOR is byte-identical."
+
+  -- ===================================================================
+  -- KERNEL
+  -- ===================================================================
+
+  kernel {
+    doc "Everything else is a composition over these. A value is one of:"
+    types [
+      | name       cbor-major  notes
+      | :"null"    7           "simple value 22"
+      | :bool      7           "simple values 20 and 21"
+      | :int       0           "unbounded; beyond 64 bits use tag 2 or 3"
+      | :float     7           "IEEE-754; NaN and infinities are values"
+      | :bytes     2           "opaque octets, never text"
+      | :text      3           "UTF-8, not normalised"
+      | :seq       4           "ordered"
+      | :map       5           "keys unique by canonical bytes"
+      | :tagged    6           "a value qualified by a tag"
+    ]
+  }
+
+  -- ===================================================================
+  -- LEXICAL STRUCTURE
+  -- ===================================================================
+
+  lexical {
+    encoding "UTF-8"
+
+    word-runes {
+      doc      "What may appear in a bare word, key, symbol name or sigil payload."
+      accept   [ :unicode-letter, :unicode-digit, :unicode-mark ]
+      punctuation "_-./+"
+      note     "Marks are essential, not an edge case: without them the IPA
+                affricate d͡ʒ and every pointed Arabic form are unwritable.
+                Mathematical symbols are NOT word runes; quote them."
+    }
+
+    sigil-payload-runes {
+      doc  "After a sigil, ':' and '=' are additionally permitted, so that
+            #sha256:9f2a and ~b64:iVBORw0KGgo= lex as one token."
+      adds ":="
+    }
+
+    sigils [
+      | glyph  token       payload            example
+      | "@"    :identifier "word"             "@ord-88213"
+      | "->"   :reference  "an identifier or a path"  "-> @cust-4471, -> @lexicon.entries.kitāb"
+      | "#"    :hash       "algorithm:hex"    "#sha256:deadbeef"
+      | "~"    :bytes      "encoding:data"    "~hex:ff00 or ~b64:iVBORw0KGgo="
+      | ":"    :symbol     "word"             ":dispatched"
+      | "!"    :extension  "name, then value" "!acme/hint { zone 4 }"
+      | "|"    :table-row  "cells"            "| sku qty"
+      | "--"   :comment    "to end of line"   "-- a note"
+      | "%"    :header     "unimsg only"      "%unimsg 0 label"
+    ]
+
+    reserved-sigils {
+      doc    "Held back so a future addition cannot silently reinterpret text
+              that parses today. Encountering one is an error."
+      glyphs "&$^*?\\"
+    }
+
+    reserved-literals {
+      doc    "Bare words that are values rather than annotations. A fixed
+              lexical list, so no coercion is value-dependent: NO is never
+              false. These may NOT be used as symbol names — ':true' is a
+              symbol named true, which is never what an author means, so it
+              is an error."
+      nor-as-a-bare-key "The same rule, for the same reason, in the other
+              position: `null 1` is a pair whose key is the word null, which is
+              never what an author means either. Quote it — `\"null\" 1` — and
+              the intent is unambiguous to a reader as well as to a parser.
+
+              This was found by four independent implementations refusing a
+              document the reference implementation accepted. The specification
+              had ruled on symbol names and been silent on keys, and every
+              independent reader concluded the rule extended; only the
+              reference concluded it did not. Four to one is not a majority
+              vote on a language question, but it is a strong signal about what
+              the text actually says, and the consistent reading is the one
+              adopted here."
+      words  [ :"true", :"false", :"null", :"nan", :"inf", :"-inf" ]
+    }
+
+    separators {
+      value-must-start-on-the-key-line true
+      doc    "A key-value pair ends at a separator, so a value may not begin
+              on the line after its key — that newline would end the pair.
+              Long strings wrap freely, since a string may span lines.
+              A key-value pair ends at a separator. Newline and comma are two
+              spellings of the same thing, one of them invisible. Runs of
+              separators collapse."
+      forms  [ :newline, :comma ]
+    }
+
+    strings {
+      delimiter "\""
+      escapes   [ :backslash-n, :backslash-t, :backslash-r, :backslash-quote, :backslash-backslash ]
+      note      "May span lines. Any other escape is an error."
+    }
+
+    numbers {
+      doc "A leading '-' begins a number only when a digit follows;
+           otherwise it belongs to a word such as by-sequence."
+      forms [
+        | form        example    lexes-as   note
+        | :integer    "-42"      :int       "arbitrary precision"
+        | :decimal    "19.99"    :decimal   "UNMARKED — the general case"
+        | :float      "2.5f"     :float     "marked with a trailing f"
+        | :scientific "6.022e23" :decimal   "exact unless marked f"
+      ]
+      note "A number immediately followed by word characters is a malformed
+            number, not a number then a word: 12abc is an error."
+    }
+
+    timestamps {
+      doc     "Tried before numbers, since 2026-08-03 would otherwise lex as
+               2026 followed by an unexpected '-'. At least YYYY-MM is
+               required, so a bare year stays an integer."
+      pattern "^\\d{4}-\\d{2}(-\\d{2}([T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})?)?)?"
+      note    "The literal text is preserved verbatim. Precision is
+               information: 2026-08 is a month, never a widened instant, and
+               an offset describes the observer."
+    }
+  }
+
+  -- ===================================================================
+  -- GRAMMAR
+  -- ===================================================================
+
+  grammar {
+    notation "EBNF"
+    productions [
+      | rule         definition
+      | :document    "[ header ] , { separator } , [ pair , { seps , pair } ] , { separator }"
+      | :header      "'%unimsg' , int , [ word ] , separator"
+      | :pair        "key , { annotation } , value"
+      | :key         "word | string"
+      | :annotation  "word | identifier"
+      | :value       "map | seq | table | scalar | tagged"
+      | :map         "'{' , { separator } , [ pair , { seps , pair } , { separator } ] , '}'"
+      | :seq         "'[' , { separator } , [ value , { seps , value } , { separator } ] , ']'"
+      | :seps        "separator , { separator }"
+      | :table       "'[' , row , { row } , ']'"
+      | :row         "'|' , { cell } , separator"
+      | :cell        "value"
+      | :scalar      "int | decimal | float | string | symbol | timestamp | bytes | reserved-literal"
+      | :tagged      "identifier | reference | hash | extension"
+    ]
+
+    rules {
+      annotations-precede-the-value "After a key, zero or more bare words are annotations, then exactly
+         one value. gloss en \"student\" is key gloss, annotation en, value
+         \"student\"."
+
+      bare-words-are-always-annotations "A bare word is never a value. Symbols are written :name. This
+         removes a positional rule and with it a silent ambiguity: [ a b ]
+         would otherwise mean one annotated value while [ a, b ] means two
+         symbols, and both round-trip cleanly."
+
+      identifiers-may-annotate "An identifier at the end of a value position is the value; followed
+         by more, it annotates. Unambiguous either way, since it is always
+         spelled @name. This is what lets 'lexeme @lex/x { … }' parse with no
+         extra grammar."
+
+      a-separator-between-items-is-required "The grammar above says seps, meaning one or more, and not { separator },
+         meaning zero or more. An earlier version said the latter, which made
+         'a 1 b 2' and '[ 1 2 3 ]' grammatical while the prose beside it said a
+         pair ends at a separator. Four implementations read the prose and
+         refused them; a fifth read the grammar and accepted them, which is how
+         the contradiction was found — the EBNF had never been implemented from
+         before, only read.
+
+         Required is the correct reading: optional separators reintroduce the
+         whitespace ambiguity that the symbol sigil was adopted to remove."
+
+      duplicate-keys-are-an-error "In any map, at any depth. JSON leaves this undefined and it is a
+         real interop hazard; under content addressing it is worse, because
+         two documents that decode identically would hash differently."
+
+      what-a-reference-denotes "A reference names one of two things, and which
+         one is visible in the reference itself.
+
+         A name containing no dot denotes an identifier — something declared
+         with @ somewhere. A name containing a dot denotes a path from the root
+         of the document holding the reference, each segment a map key.
+
+         The distinction costs no syntax because infix dot is already reserved
+         for paths, and both forms already parse: a reference is stored as one
+         opaque string either way, dots included.
+
+         Why both. An identifier is a stable name that survives the thing being
+         moved, and must be declared. A path is a location that needs no
+         declaration and breaks if the document is reorganised. Neither is
+         better; they answer different needs, and requiring only one imposes
+         its cost everywhere. Requiring identifiers makes every entry of a
+         keyed collection write its own name twice, with nothing checking the
+         two agree. Requiring paths makes every reference fragile.
+
+         A key that itself contains a dot cannot be reached by a path, because
+         the dot is a separator. Such a key needs an identifier."
+
+      key-it-if-you-will-reference-it "A consequence worth stating, because it
+         decides how a document is shaped. A path segment is a map key, so a
+         row of a table cannot be addressed: rows are sequence elements and
+         have no names. An identifier written in a row annotates that row's
+         first value rather than naming the row.
+
+         So a collection whose members will be referenced should be a map keyed
+         by their names, not a table. A table is right for rows that are read
+         together and pointed at never — which is most tables, and exactly why
+         the distinction is easy to miss until the first reference is needed."
+
+      references-are-still-inert "None of the above is resolved while reading.
+         A decoder produces the reference and stops, exactly as before —
+         resolution is a separate act performed by something that has chosen a
+         set of documents to resolve against, and is no more part of decoding
+         than following a hyperlink is part of parsing HTML."
+
+      resolution-is-relative-to-a-set "A path is rooted at its own document; a
+         reference across documents therefore uses an identifier. Whether any
+         given reference resolves depends on which documents are in hand, so a
+         reference that resolves in no set is not thereby invalid — the format
+         cannot know what else exists. A checker reports; it does not judge."
+
+            table-is-sugar "A table encodes exactly as a sequence of maps with identical key
+         sets. Header cells name the fields; each row must supply exactly as
+         many cells. Cells need no separator because an annotated value is
+         self-delimiting."
+
+      header-cells-are-keys "A header cell names a map key, so it may be
+         written the way a key is written anywhere else: a bare word, or a
+         quoted string when the name contains a space.
+
+         The first version of this rule allowed only bare words, which made a
+         table header the one place in the format where a key could not be
+         quoted. The failure was silent and misleading: `| hazard  what happens`
+         parsed as three columns, and the error arrived on the following row as
+         a cell-count mismatch, naming neither the header nor the cause. It
+         caught the same author four times in one day across four documents,
+         which is a property of the grammar rather than of the author.
+
+         Purely additive: every table already written stays valid and encodes
+         to the same bytes, because a bare word means what it always meant."
+    }
+  }
+
+  -- ===================================================================
+  -- ENCODING
+  -- ===================================================================
+
+  encoding {
+    determinism {
+      profile "RFC 8949 section 4.2 core deterministic encoding"
+      required true
+      note "Mandatory, not a mode. Shortest-form integers, definite lengths,
+            shortest-form floats, map keys sorted by their encoded bytes.
+            An encoder must refuse to emit anything else."
+    }
+
+    decoding {
+      doc "The specification was encoder-only until independent implementations
+           built decoders anyway and each invented its own strictness rules.
+           A reader that accepts input an encoder could never have produced is
+           not interoperable with one that refuses it."
+
+      reject-non-deterministic-input true
+      reject-trailing-data true
+
+      how "The simplest conforming check, and the one least able to miss a
+           rule: re-encode the decoded value and compare the bytes with the
+           input. Enforcing determinism rule by rule during decode verifies
+           the causes; this verifies the property, and cannot be incomplete.
+           Report the offset of the first differing byte."
+
+      note "A decoder must not repair. Sorting an out-of-order map or
+            shortening a non-shortest integer silently turns non-conforming
+            input into conforming output, which is how divergence spreads."
+    }
+
+    byte-order-mark {
+      doc "A leading U+FEFF is an encoding marker, not content. Implementations
+           observed splitting on this: two rejected it, one silently consumed
+           it, which is exactly the kind of gap a specification exists to close."
+      permitted true
+      ignored   true
+      note "Permitted and skipped, following RFC 8259's treatment for JSON.
+            Rejecting is defensible but hostile — editors emit these without
+            being asked — and the marker carries no data, so ignoring it loses
+            nothing."
+    }
+
+    tags [
+      | number  name          content                                    notes
+      | 4       :decimal      "[ exponent, mantissa ] both integers"     "RFC 8949 3.4.4; value = mantissa * 10^exponent"
+      | 70100   :symbol       "text"                                     "the name, without the leading colon"
+      | 70101   :annotated    "[ [ annotation… ], value ]"               "annotations are symbol or identifier tags"
+      | 70102   :identifier   "text"                                     "the name, without the leading @"
+      | 70103   :reference    "text"                                     "target name WITHOUT the leading @; never resolved by the parser"
+      | 70104   :hash         "[ algorithm-text, digest-bytes ]"         "digest is decoded from hex"
+      | 70105   :extension    "[ name-text, value ]"                     "name without the leading !"
+      | :note   :sigils-stripped "@ -> ! are syntax, not part of the stored name" "applies to 70102, 70103, 70105"
+      | 70106   :timestamp    "text"                                     "the literal, verbatim"
+    ]
+
+    tag-numbers-are-provisional "70100–70106 are placeholders. The eventual scheme is hash-derived, so
+       these will change. They are fixed here so that independent
+       implementations can agree today."
+
+    mapping [
+      | text-form            cbor
+      | "{ … }"              "map, text keys"
+      | "[ … ]"              "array"
+      | "| rows"             "array of maps — identical to the longhand"
+      | "123"                "integer, or tag 2/3 beyond 64 bits"
+      | "19.99"              "tag 4 decimal fraction"
+      | "2.5f"               "float, shortest form"
+      | "\"…\""              "text"
+      | ":word"              "tag 70100"
+      | "word value"         "tag 70101"
+      | "@name"              "tag 70102"
+      | "-> @name"           "tag 70103"
+      | "#alg:hex"           "tag 70104"
+      | "!name value"        "tag 70105"
+      | "2026-08"            "tag 70106"
+      | "~hex: / ~b64:"      "byte string — a kernel type, no tag"
+      | "true false null"    "simple values"
+      | "nan inf -inf"       "floats"
+    ]
+
+    decimals-preserve-what-was-written "Mantissa and exponent are stored as written, not canonicalised. 1.00
+       and 1.0 are DIFFERENT values, because trailing zeros carry
+       significance in money and measurement. 19.99 becomes [ -2, 1999 ]."
+
+    comments-never-reach-the-binary "Comments are lexical. Encoding a document with and without commentary
+       must produce identical bytes, or content addressing breaks: a
+       signature would be invalidated by fixing a typo in a comment."
+  }
+
+  -- ===================================================================
+  -- DECISIONS
+  -- ===================================================================
+
+  decisions [
+    | id    subject             ruling                                                        rationale
+    | :D1   :key-equality       "byte equality of the canonical encoding of the key"          "native equality diverges: -0.0 == 0.0 but NaN != NaN"
+    | :D2   :map-ordering       "unordered; canonical sorts keys by encoded bytes"            "required for content addressing"
+    | :D3   :determinism        "RFC 8949 4.2, mandatory"                                     "hashing and signing depend on it"
+    | :D4   :finiteness         "values are finite"                                           "indefinite length is streaming, not infinity"
+    | :D5   :normalisation      "none; text preserved byte-for-byte"                          "normalising silently alters data"
+    | :D6   :comments           "lexical only; survive text to text"                          "in the bytes they would break content addressing"
+    | :D7   :tag-space          "hash-derived eventually; fixed numbers for now"              "defers governance without foreclosing it"
+    | :D10  :float-keys         "legal in the kernel, banned in the v0 profile"               "profile restrictions are reversible; kernel changes are not"
+    | :D11  :decimal-default    "unmarked literals are exact decimals; floats marked f"       "the general case should be unmarked"
+  ]
+
+  -- ===================================================================
+  -- CANONICAL TEXT FORM
+  -- ===================================================================
+
+  formatting {
+    doc "There is exactly one canonical rendering and no options. The point
+         of a canonical formatter is to end the argument, not to host it.
+         Formatting must be idempotent."
+
+    ordering {
+      rule "Single-line values first, multi-line after; alphabetical within
+            each group."
+      note "This deliberately does NOT match the binary key order of D2. It
+            does not have to: the binary sorts independently, so text order
+            affects no bytes. It need only be deterministic."
+    }
+
+    comment-binding {
+      rule "A comment binds to the path of the pair it precedes, never to a
+            line number, and moves with that pair when ordering changes.
+            A comment that FOLLOWS a value on the same line binds to the pair
+            just read, and terminates that pair as a separator would."
+      trailing-comments-are-legal true
+      note-on-trailing "Left unstated, this split four implementations three to
+                        one: three accepted a trailing comment and one refused
+                        it, correctly, because the specification described only
+                        comments that precede. Authors reach for the trailing
+                        form immediately — the first document written in anger
+                        used one — so it is permitted rather than forbidden."
+      why  "A comment left in place while content moves around it ends up
+            describing something it was not written about — a confident claim
+            about the wrong value, which is worse than deleting it."
+      note "A block carrying comments never collapses to flow form, since the
+            comments would have nowhere to live."
+    }
+
+    inline {
+      budget 56
+      rule   "Maps and sequences render on one line when every value is
+              single-line and the result fits the budget; otherwise block
+              form. Flow form separates with commas, block form with
+              newlines."
+    }
+
+    tables {
+      rule "A sequence renders as a table when it holds two or more maps with
+            identical key sets, no multi-line cells, header names needing no
+            quoting, and the inline form does not already fit."
+      note "The final column is not padded: trailing whitespace breaks diffs
+            and editors strip it, which would break idempotence."
+    }
+
+    floats-keep-their-marker "A binary float always renders with a trailing f and a decimal point,
+       so it can never re-read as an integer or as an exact decimal."
+  }
+
+  -- ===================================================================
+  -- ERRORS
+  -- ===================================================================
+
+  errors {
+    doc "A format is exactly as friendly as its worst parse error."
+    requirements [
+      :every-error-carries-line-and-column,
+      :errors-name-the-fix-where-one-is-obvious,
+      :decoding-is-total-and-side-effect-free,
+      :nothing-is-resolved-or-fetched-during-parsing
+    ]
+    examples [
+      | input        message
+      | "x [ a b ]"  "annotation \"b\" has no value — did you mean \":b\"?"
+      | "x :true"    "\":true\" is a symbol named \"true\", not the literal — write true"
+      | "a 1, a 2"   "duplicate key \"a\""
+      | "x 12abc"    "\"12abc\" is not a valid number or word"
+    ]
+  }
+
+  -- ===================================================================
+  -- CONFORMANCE
+  -- ===================================================================
+
+  conformance {
+    must [
+      :round-trip-text-to-cbor-to-text-to-cbor-byte-identically,
+      :format-idempotently,
+      :reject-duplicate-keys-at-every-depth,
+      :preserve-the-integer-float-distinction,
+      :preserve-decimal-mantissa-and-exponent-as-written,
+      :preserve-timestamp-precision-and-offset,
+      :emit-only-deterministic-encodings
+    ]
+
+    integer-float-note "Language runtimes without distinct numeric types must use a wrapper.
+       JavaScript cannot represent the distinction at all: it maps float 1.0
+       onto the canonical form of integer 1, silently."
+
+    self-test {
+      doc "An implementation is correct when it agrees byte-for-byte with the
+           reference encoder on every document in the test corpus."
+      command "go run ./tools/compare -- <your-encoder-command>"
+      note "That command needs a repository an implementer working from this
+            document alone does not have. The vectors below are the part of
+            the conformance criterion that travels with the specification."
+    }
+
+    -- Each source line encodes to exactly these bytes. Machine-checkable, and
+    -- sufficient on its own to pin every tag number, the annotation shape, the
+    -- decimal representation and the integer/float distinction — all of which
+    -- a first independent implementation otherwise had to infer.
+    vectors [
+      | source                                      canonical-hex
+      | "a 1"                                       "a1616101"
+      | "x [ | a b || 1 2 ]"                        "a1617881a2616101616202"
+      | "x [ | \"a\" \"b\" || 1 2 ]"                  "a1617881a2616101616202"
+      | "a -1"                                      "a1616120"
+      | "a 1.0"                                     "a16161c482200a"
+      | "a 1.00"                                    "a16161c482211864"
+      | "a 1.0f"                                    "a16161f93c00"
+      | "a \"x\""                                   "a161616178"
+      | "a :x"                                      "a16161da000111d46178"
+      | "a true"                                    "a16161f5"
+      | "a null"                                    "a16161f6"
+      | "a nan"                                     "a16161f97e00"
+      | "a inf"                                     "a16161f97c00"
+      | "a []"                                      "a1616180"
+      | "a {}"                                      "a16161a0"
+      | "a [ 1, 2 ]"                                "a16161820102"
+      | "a @x"                                      "a16161da000111d66178"
+      | "a -> @x"                                   "a16161da000111d76178"
+      | "a #sha256:00ff"                            "a16161da000111d882667368613235364200ff"
+      | "a ~hex:00ff"                               "a161614200ff"
+      | "a !e/x 1"                                  "a16161da000111d98263652f7801"
+      | "a usd 1.99"                                "a16161da000111d58281da000111d463757364c4822118c7"
+      | "a 2026-08"                                 "a16161da000111da67323032362d3038"
+      | "a 2026-08-03T14:22:07Z"                    "a16161da000111da74323032362d30382d30335431343a32323a30375a"
+      | "a 18446744073709551615"                    "a161611bffffffffffffffff"
+      | "a 340282366920938463463374607431768211456" "a16161c2510100000000000000000000000000000000"
+      | "a { b 1, c 2 }"                            "a16161a2616201616302"
+      | "a [ { b 1, c 2 }, { b 3, c 4 } ]"          "a1616182a2616201616302a2616203616304"
+    ]
+  }
+}
