@@ -10,10 +10,12 @@
 /// have every call pay for a Future.
 library;
 
+export 'src/config/config_writer.dart';
 export 'src/config/git_config.dart';
 export 'src/diff/text_diff.dart';
 export 'src/diff/tree_diff.dart';
 export 'src/index/git_index.dart';
+export 'src/merge/merge.dart';
 export 'src/object_id.dart';
 export 'src/objects/commit.dart';
 export 'src/objects/git_object.dart';
@@ -21,12 +23,18 @@ export 'src/objects/identity.dart';
 export 'src/objects/tag.dart';
 export 'src/objects/tree.dart';
 export 'src/refs/ref_store.dart';
+export 'src/remote/remote.dart';
 export 'src/repository.dart';
 export 'src/storage/loose_object_store.dart';
 export 'src/storage/object_store.dart';
 export 'src/storage/pack_file.dart';
 export 'src/storage/pack_index.dart';
+export 'src/storage/pack_parser.dart';
+export 'src/storage/pack_writer.dart';
+export 'src/transfer/credentials.dart';
+export 'src/transfer/fetch.dart';
 export 'src/transfer/pkt_line.dart';
+export 'src/transfer/push.dart';
 export 'src/worktree/checkout.dart';
 export 'src/worktree/ignore.dart';
 export 'src/worktree/status.dart';

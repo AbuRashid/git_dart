@@ -16,6 +16,7 @@ import 'objects/identity.dart';
 import 'objects/tag.dart';
 import 'objects/tree.dart';
 import 'refs/ref_store.dart';
+import 'remote/remote.dart';
 import 'storage/object_store.dart';
 import 'worktree/checkout.dart';
 import 'worktree/ignore.dart';
@@ -442,8 +443,124 @@ class Repository {
     return null;
   }
 
+  /// Whether [name] is one git would accept for a branch.
+  ///
+  /// A subset of `git check-ref-format`, covering what a person typing into a
+  /// box can get wrong. Refusing here is better than writing a ref file git
+  /// will later decline to read.
+  static String? branchNameProblem(String name) {
+    if (name.isEmpty) return 'a name is required';
+    if (name.startsWith('-')) return 'it cannot start with a dash';
+    if (name.startsWith('/') || name.endsWith('/')) {
+      return 'it cannot start or end with a slash';
+    }
+    if (name.endsWith('.') || name.endsWith('.lock')) {
+      return 'it cannot end with a dot or with .lock';
+    }
+    if (name.contains('..')) return 'it cannot contain two dots';
+    if (name.contains('//')) return 'it cannot contain two slashes';
+    if (name == '@') return '@ on its own is not a name';
+    if (name.contains('@{')) return 'it cannot contain @{';
+    for (final rune in name.runes) {
+      if (rune <= 0x20 || rune == 0x7f) {
+        return 'it cannot contain spaces or control characters';
+      }
+      if ('~^:?*[\\'.codeUnits.contains(rune)) {
+        return 'it cannot contain ~ ^ : ? * [ or a backslash';
+      }
+    }
+    return null;
+  }
+
+  /// Renames a branch, moving HEAD and its tracking configuration with it.
+  ///
+  /// The three things that make this more than writing one ref: the branch may
+  /// live in `packed-refs`, HEAD may be pointing at it, and `branch.<name>.*`
+  /// records what it tracks. Missing any of them leaves a repository that
+  /// looks renamed and behaves oddly afterwards.
+  void renameBranch(String from, String to, {bool force = false}) {
+    final problem = branchNameProblem(to);
+    if (problem != null) throw ArgumentError.value(to, 'to', problem);
+
+    final id = refs.resolve('refs/heads/$from');
+    if (id == null) throw StateError('no branch named $from');
+    if (from == to) return;
+
+    if (refs.read('refs/heads/$to') != null && !force) {
+      throw StateError('a branch named $to already exists');
+    }
+
+    final wasCurrent = refs.currentBranch == 'refs/heads/$from';
+
+    // The old ref goes first. Renaming `feature` to `feature/one` needs a
+    // directory where the old ref's file is, and a file and a directory
+    // cannot share a name — which is why git deletes before it creates. If
+    // the write then fails, the old ref goes back.
+    refs.delete('refs/heads/$from');
+    try {
+      refs.write('refs/heads/$to', id);
+    } catch (_) {
+      refs.write('refs/heads/$from', id);
+      rethrow;
+    }
+
+    // HEAD names the branch by path, so it would otherwise point at a ref
+    // that no longer exists — which reads as an unborn branch.
+    if (wasCurrent) refs.writeSymbolic('HEAD', 'refs/heads/$to');
+
+    _renameBranchConfig(from, to);
+  }
+
+  /// Moves a `[branch "from"]` section to `[branch "to"]`, keeping its lines.
+  void _renameBranchConfig(String from, String to) {
+    final file = File(p.join(gitDirectory, 'config'));
+    if (!file.existsSync()) return;
+
+    final wanted = '[branch "$from"]';
+    final lines = file.readAsLinesSync();
+    if (!lines.any((line) => line.trim() == wanted)) return;
+
+    final out = <String>[];
+    for (final line in lines) {
+      out.add(line.trim() == wanted ? '[branch "$to"]' : line);
+    }
+    file.writeAsStringSync('${out.join('\n')}\n');
+    reloadConfig();
+  }
+
+  /// Deletes a branch. The commits it pointed at are left alone; what makes
+  /// them unreachable is nothing pointing at them any more.
+  void deleteBranch(String name) {
+    if (refs.currentBranch == 'refs/heads/$name') {
+      throw StateError('cannot delete the branch that is checked out');
+    }
+    if (refs.resolve('refs/heads/$name') == null) {
+      throw StateError('no branch named $name');
+    }
+    refs.delete('refs/heads/$name');
+    _removeBranchConfig(name);
+  }
+
+  /// Drops a `[branch "name"]` section, as deleting a branch should.
+  void _removeBranchConfig(String name) {
+    final file = File(p.join(gitDirectory, 'config'));
+    if (!file.existsSync()) return;
+
+    final kept = <String>[];
+    var inSection = false;
+    for (final line in file.readAsLinesSync()) {
+      final trimmed = line.trim();
+      if (trimmed.startsWith('[')) inSection = trimmed == '[branch "$name"]';
+      if (!inSection) kept.add(line);
+    }
+    file.writeAsStringSync('${kept.join('\n')}\n');
+    reloadConfig();
+  }
+
   /// Creates a branch at [at], or at HEAD.
   void createBranch(String name, {ObjectId? at}) {
+    final problem = branchNameProblem(name);
+    if (problem != null) throw ArgumentError.value(name, 'name', problem);
     final path = name.startsWith('refs/') ? name : 'refs/heads/$name';
     if (refs.read(path) != null) {
       throw ArgumentError.value(name, 'name', 'branch already exists');
@@ -458,6 +575,109 @@ class Repository {
   // ---- writing ------------------------------------------------------------
 
   ObjectId writeObject(GitObject object) => objects.write(object);
+
+  // ---- remotes ------------------------------------------------------------
+
+  RemoteStore get remotes => RemoteStore(gitDirectory);
+
+  /// What [ours] has that [theirs] does not, and the other way about.
+  ///
+  /// This is what `git rev-list --left-right --count` reports, and it is
+  /// computed the plain way: everything each side reaches, then the
+  /// difference. Null when either side has more than [limit] commits, so a
+  /// caller can say "not counted" rather than freeze.
+  ///
+  /// Two cleverer versions were written first and both disagreed with git.
+  /// Walking newest-first and stopping when the frontier looks shared is what
+  /// git does, and it leans on commit dates: histories whose commits share a
+  /// timestamp — anything scripted, imported or rebased in a hurry — order
+  /// arbitrarily and the walk stops too early. Pruning at shared commits
+  /// instead is sound in principle but needs to know a commit is shared
+  /// before walking past it, which is the same question again.
+  ///
+  /// Without generation numbers, which git keeps in a commit-graph file this
+  /// library does not read, there is no shortcut that is both exact and
+  /// cheap. Exact and bounded is the better trade for a number shown next to
+  /// a remote: a wrong count is worse than a slow one, and the result is
+  /// cached by the caller.
+  AheadBehind? countAheadBehind(
+    ObjectId ours,
+    ObjectId theirs, {
+    int limit = 250000,
+  }) {
+    if (ours == theirs) return const AheadBehind(0, 0);
+
+    Set<ObjectId>? reachable(ObjectId from) {
+      final seen = <ObjectId>{};
+      final pending = <ObjectId>[from];
+      while (pending.isNotEmpty) {
+        final id = pending.removeLast();
+        if (!seen.add(id)) continue;
+        if (seen.length > limit) return null;
+        final raw = objects.readRaw(id);
+        if (raw == null) continue; // a shallow boundary
+        final object = GitObject.parse(raw.kind, raw.content);
+        if (object is Commit) pending.addAll(object.parents);
+      }
+      return seen;
+    }
+
+    final fromOurs = reachable(ours);
+    if (fromOurs == null) return null;
+    final fromTheirs = reachable(theirs);
+    if (fromTheirs == null) return null;
+
+    var ahead = 0;
+    for (final id in fromOurs) {
+      if (!fromTheirs.contains(id)) ahead += 1;
+    }
+    var behind = 0;
+    for (final id in fromTheirs) {
+      if (!fromOurs.contains(id)) behind += 1;
+    }
+    return AheadBehind(ahead, behind);
+  }
+
+  /// Where a branch stands against the ref it tracks.
+  BranchTracking trackingFor(String branch) {
+    final localTip = refs.resolve('refs/heads/$branch');
+    final upstream = upstreamOf(config, branch);
+
+    if (upstream == null) {
+      return BranchTracking(branch: branch, localTip: localTip);
+    }
+
+    // `branch.x.merge` names the ref on the remote; the local copy of it is
+    // wherever that remote's refspec puts it.
+    final remote = remotes.named(upstream.remote);
+    final trackingRef = remote?.trackingRefFor(upstream.ref) ??
+        'refs/remotes/${upstream.remote}/$branch';
+    final upstreamTip = refs.resolve(trackingRef);
+
+    return BranchTracking(
+      branch: branch,
+      localTip: localTip,
+      upstreamRef: trackingRef,
+      upstreamTip: upstreamTip,
+      divergence: localTip != null && upstreamTip != null
+          ? countAheadBehind(localTip, upstreamTip)
+          : null,
+    );
+  }
+
+  /// Records that [branch] follows [ref] on [remote], as `--set-upstream` does.
+  void setUpstream(String branch, String remote, String ref) {
+    final file = File(p.join(gitDirectory, 'config'));
+    final existing = file.existsSync() ? file.readAsStringSync() : '';
+    final separator = existing.isEmpty || existing.endsWith('\n') ? '' : '\n';
+    file.writeAsStringSync(
+      '$existing$separator'
+      '[branch "$branch"]\n'
+      '\tremote = $remote\n'
+      '\tmerge = $ref\n',
+    );
+    reloadConfig();
+  }
 
   // ---- the staging area ---------------------------------------------------
 

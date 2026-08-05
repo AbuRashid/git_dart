@@ -132,6 +132,192 @@ class RepositorySummary {
       !available && (reason?.offersInitialising ?? false);
 }
 
+/// One setting as it stands: what is in force, and where it came from.
+class SettingValue {
+  final String key;
+
+  /// Null when nothing sets it, in which case git''s own default applies —
+  /// which is said in words rather than shown as though it were set.
+  final String? value;
+
+  /// The index of ConfigScope, or null when unset.
+  final int? scope;
+  final String? scopeLabel;
+
+  const SettingValue({
+    required this.key,
+    this.value,
+    this.scope,
+    this.scopeLabel,
+  });
+
+  bool get isSet => value != null;
+}
+
+/// A remote, and where the current branch stands against it.
+class RemoteData {
+  final String name;
+  final String url;
+
+  /// True when the URL names a directory on this machine, which can be
+  /// fetched by reading it rather than over a protocol.
+  final bool isLocal;
+
+  /// True when this build can fetch from the URL at all.
+  final bool canFetch;
+
+  /// The tracking ref this remote holds for the current branch, if it has one.
+  final String? trackingRef;
+
+  /// How the current branch stands against that ref, as of the last fetch.
+  /// Null when there is no tracking ref, or when the history was too large to
+  /// count.
+  final int? ahead;
+  final int? behind;
+
+  /// True when a tracking ref exists but the count was not attempted.
+  final bool tooLargeToCount;
+
+  /// True when this repository holds no copy of anything from this remote —
+  /// it has never fetched from it. Different from "the remote has no such
+  /// branch", and the two want different advice.
+  final bool neverFetched;
+
+  const RemoteData({
+    required this.name,
+    required this.url,
+    this.isLocal = false,
+    this.canFetch = true,
+    this.trackingRef,
+    this.ahead,
+    this.behind,
+    this.tooLargeToCount = false,
+    this.neverFetched = false,
+  });
+
+  bool get hasCounts => ahead != null && behind != null;
+  bool get isEven => ahead == 0 && behind == 0;
+}
+
+/// What a push did.
+class PushOutcome {
+  final String remote;
+  final int objectsSent;
+
+  /// True when the remote wants credentials. The caller asks the user and
+  /// tries again rather than treating it as a failure.
+  final bool needsCredentials;
+
+  /// True when a secret was sent and refused, rather than never sent — the
+  /// difference between "sign in" and "that was wrong".
+  final bool wereRejected;
+
+  /// The name to offer in the prompt, from the URL or from what was saved.
+  final String? username;
+
+  /// Whether a credential helper is configured, and so whether the secret
+  /// can be saved at all.
+  final bool canSave;
+
+  /// Refs that moved, as `refs/heads/main abc1234..def5678`.
+  final List<String> updated;
+
+  /// Refs the remote would not take, with its reason.
+  final List<String> rejected;
+
+  final String? error;
+
+  const PushOutcome({
+    required this.remote,
+    this.objectsSent = 0,
+    this.updated = const [],
+    this.rejected = const [],
+    this.error,
+    this.needsCredentials = false,
+    this.wereRejected = false,
+    this.username,
+    this.canSave = false,
+  });
+
+  bool get ok => error == null && rejected.isEmpty && !needsCredentials;
+
+  /// True when the push was refused only because it would not fast-forward,
+  /// which is the case worth offering to force.
+  bool get canForce =>
+      error == null && rejected.any((r) => r.contains('fast-forward'));
+}
+
+/// What a fetch did.
+class FetchOutcome {
+  final String remote;
+  final int objectsReceived;
+
+  /// True when the remote wants credentials.
+  final bool needsCredentials;
+  final bool wereRejected;
+  final String? username;
+  final bool canSave;
+
+  /// Refs that moved, as `refs/remotes/origin/main abc1234..def5678`.
+  final List<String> updated;
+
+  final String? error;
+
+  const FetchOutcome({
+    required this.remote,
+    this.objectsReceived = 0,
+    this.updated = const [],
+    this.error,
+    this.needsCredentials = false,
+    this.wereRejected = false,
+    this.username,
+    this.canSave = false,
+  });
+
+  bool get isEmpty => updated.isEmpty && error == null;
+}
+
+/// What a pull did: the fetch, then the merge.
+class PullOutcome {
+  final String remote;
+  final FetchOutcome fetch;
+
+  /// Null when the fetch failed or wanted credentials, so nothing was merged.
+  final String? mergeOutcome;
+  final List<String> conflicts;
+  final String? mergedCommit;
+  final String? error;
+
+  const PullOutcome({
+    required this.remote,
+    required this.fetch,
+    this.mergeOutcome,
+    this.conflicts = const [],
+    this.mergedCommit,
+    this.error,
+  });
+
+  bool get ok => error == null && conflicts.isEmpty;
+}
+
+/// Where a branch stands against the ref it tracks.
+class TrackingData {
+  final String branch;
+  final String? upstream;
+  final int ahead;
+  final int behind;
+
+  const TrackingData({
+    required this.branch,
+    this.upstream,
+    this.ahead = 0,
+    this.behind = 0,
+  });
+
+  bool get hasUpstream => upstream != null;
+  bool get isEven => ahead == 0 && behind == 0;
+}
+
 /// One path's place in the staging area.
 ///
 /// Both halves, because a file can be staged one way and modified again since,

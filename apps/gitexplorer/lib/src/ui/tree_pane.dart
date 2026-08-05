@@ -21,8 +21,26 @@ class TreePane extends StatelessWidget {
   Widget build(BuildContext context) {
     final rows = state.rows;
 
+    final theme = Theme.of(context);
+
     return Column(
       children: [
+        // The header of the list, with the one action that changes it.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+          child: Row(
+            children: [
+              Text('Repositories', style: theme.textTheme.titleSmall),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.add),
+                tooltip: 'Add a repository',
+                onPressed: () => addRepository(context, state),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
         Expanded(
           child: rows.isEmpty
               ? _EmptyRoot(state: state)

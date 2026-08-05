@@ -161,19 +161,47 @@ class GitConfig {
   static String _unquote(String value) {
     var text = value;
     // A trailing comment is not part of the value unless it is quoted.
+    //
+    // Escapes are read either way: quoting decides how whitespace and comment
+    // characters are treated, not whether a backslash is an escape. git writes
+    // `url = C:\\Users\\a` unquoted, and reading that literally gives a path
+    // with doubled separators that matches nothing.
     if (!text.startsWith('"')) {
       final hash = text.indexOf(RegExp('[#;]'));
       if (hash >= 0) text = text.substring(0, hash).trim();
-      return text;
+      return _unescape(text);
     }
     final close = text.lastIndexOf('"');
     if (close <= 0) return text;
-    return text
-        .substring(1, close)
-        .replaceAll(r'\"', '"')
-        .replaceAll(r'\\', r'\')
-        .replaceAll(r'\n', '\n')
-        .replaceAll(r'\t', '\t');
+    return _unescape(text.substring(1, close));
+  }
+
+  /// Reads escape sequences in a single left-to-right pass.
+  ///
+  /// Sequential replaces cannot do this: turning `\\` into `\` first leaves a
+  /// backslash that the next rule reads as the start of an escape, so
+  /// `C:\\temp\\twice` became `C:\temp<tab>wice`. Found by pushing to a
+  /// Windows path.
+  static String _unescape(String value) {
+    final out = StringBuffer();
+    for (var i = 0; i < value.length; i++) {
+      if (value[i] != r'\' || i + 1 >= value.length) {
+        out.write(value[i]);
+        continue;
+      }
+      i += 1;
+      out.write(switch (value[i]) {
+        'n' => '\n',
+        't' => '\t',
+        'b' => '\b',
+        '"' => '"',
+        r'\' => r'\',
+        // git treats an unknown escape as an error; keeping the character is
+        // friendlier and cannot corrupt a path.
+        final other => other,
+      });
+    }
+    return out.toString();
   }
 
   static String? get _home =>

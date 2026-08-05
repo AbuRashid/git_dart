@@ -190,13 +190,75 @@ class RefStore {
     temporary.renameSync(file.path);
   }
 
-  /// Removes a loose ref. A ref that exists only in `packed-refs` is left
-  /// alone and reported as false, because deleting it means rewriting that
-  /// file — a separate operation with its own atomicity problem.
+  /// Removes a loose ref, leaving any packed one in place.
   bool deleteLoose(String refPath) {
     final file = File(_pathOf(refPath));
     if (!file.existsSync()) return false;
     file.deleteSync();
+    _pruneEmptyDirectories(file.parent);
     return true;
+  }
+
+  /// Removes directories left empty under `refs/`.
+  ///
+  /// They are not harmless: with `refs/heads/feature/one` gone, the empty
+  /// `feature` directory stops a branch called `feature` from being created,
+  /// because a file and a directory cannot share a name.
+  void _pruneEmptyDirectories(Directory directory) {
+    final root = p.join(gitDirectory, 'refs');
+    var current = directory;
+    while (p.isWithin(root, current.path)) {
+      if (!current.existsSync() || current.listSync().isNotEmpty) return;
+      current.deleteSync();
+      current = current.parent;
+    }
+  }
+
+  /// Removes a ref wherever it lives.
+  ///
+  /// A branch may exist only as a line in `packed-refs`, where deleting the
+  /// loose file does nothing at all and the ref appears to come back. So the
+  /// packed file is rewritten too, whole and atomically.
+  bool delete(String refPath) {
+    final hadLoose = deleteLoose(refPath);
+    final packed = File(p.join(gitDirectory, 'packed-refs'));
+    if (!packed.existsSync()) return hadLoose;
+
+    final kept = <String>[];
+    var removedPacked = false;
+    var dropNextPeeled = false;
+
+    for (final line in LineSplitter.split(packed.readAsStringSync())) {
+      // A `^` line carries the object an annotated tag points at and belongs
+      // to the line above it, so it goes when that line goes.
+      if (line.startsWith('^')) {
+        if (dropNextPeeled) {
+          dropNextPeeled = false;
+          continue;
+        }
+        kept.add(line);
+        continue;
+      }
+      dropNextPeeled = false;
+
+      final space = line.indexOf(' ');
+      if (space == ObjectId.hexLength &&
+          line.substring(space + 1).trim() == refPath) {
+        removedPacked = true;
+        dropNextPeeled = true;
+        continue;
+      }
+      kept.add(line);
+    }
+
+    if (removedPacked) {
+      final temporary = File('${packed.path}.lock');
+      temporary.writeAsStringSync(
+        kept.isEmpty ? '' : '${kept.join('\n')}\n',
+      );
+      temporary.renameSync(packed.path);
+    }
+
+    return hadLoose || removedPacked;
   }
 }

@@ -39,6 +39,28 @@ Color? statusColor(FileState state, BuildContext context) {
   };
 }
 
+/// The fill behind a "that worked" message.
+///
+/// A solid tint from Material's green swatch rather than the status colour at
+/// low opacity: a 14% wash over a surface that already carries Material 3's
+/// own tint comes out grey-green and reads as disabled, which is the opposite
+/// of what a success notice is for.
+Color successBackground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+        ? Colors.green.shade800
+        : Colors.green.shade100;
+
+/// The green a success mark is drawn in — strong enough to carry white.
+Color successMark(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+        ? Colors.green.shade500
+        : Colors.green.shade600;
+
+Color onSuccessBackground(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+        ? Colors.green.shade50
+        : Colors.green.shade900;
+
 /// File contents, diffs and object names — the three things whose alignment
 /// carries meaning.
 TextStyle monospaceStyle(BuildContext context) =>

@@ -569,6 +569,189 @@ void main() {
       File(p.join(repoPath, 'lib', 'extra.dart')).deleteSync();
     });
 
+    test('adds, lists and fetches a remote that is a folder', () async {
+      // A second repository to fetch from, made with real git.
+      final origin = p.join(scratch.path, 'origin');
+      Directory(origin).createSync(recursive: true);
+      git(['init', '-q', '-b', 'main'], cwd: origin);
+      git(['config', 'user.name', 'A'], cwd: origin);
+      git(['config', 'user.email', 'a@x'], cwd: origin);
+      File(p.join(origin, 'shared.txt')).writeAsStringSync('hello\n');
+      git(['add', '.'], cwd: origin);
+      git(['commit', '-q', '-m', 'from the origin'], cwd: origin);
+
+      final remotes = await service.addRemote(repoPath, 'origin', origin);
+      expect(remotes.map((r) => r.name), ['origin']);
+      expect(remotes.single.isLocal, isTrue);
+      expect(remotes.single.canFetch, isTrue);
+
+      final outcome = await service.fetchRemote(repoPath, 'origin');
+      expect(outcome.error, isNull);
+      expect(outcome.objectsReceived, greaterThan(0));
+      expect(outcome.updated.single, contains('refs/remotes/origin/main'));
+
+      // git's opinion of what arrived.
+      expect(
+        git(['rev-parse', 'refs/remotes/origin/main']).trim(),
+        git(['rev-parse', 'main'], cwd: origin).trim(),
+      );
+      expect(
+        git(['cat-file', 'blob', 'refs/remotes/origin/main:shared.txt']),
+        'hello\n',
+      );
+
+      // Fetching again finds nothing new.
+      final again = await service.fetchRemote(repoPath, 'origin');
+      expect(again.objectsReceived, 0);
+      expect(again.updated, isEmpty);
+
+      // The tile's counts: this repository's branch against what the remote
+      // had at the last fetch. Unrelated histories here, so everything on
+      // both sides counts.
+      final tile = (await service.remotes(repoPath)).single;
+      expect(tile.trackingRef, 'refs/remotes/origin/main');
+      expect(tile.hasCounts, isTrue);
+      final gitCounts = git([
+        'rev-list',
+        '--left-right',
+        '--count',
+        'main...refs/remotes/origin/main',
+      ]).trim().split(RegExp(r'\s+'));
+      expect(tile.ahead, int.parse(gitCounts[0]));
+      expect(tile.behind, int.parse(gitCounts[1]));
+
+      await service.removeRemote(repoPath, 'origin');
+      expect(await service.remotes(repoPath), isEmpty);
+    });
+
+    /// A repository of its own, so a test that rewrites history cannot
+    /// disturb the fixture every other test in this file shares.
+    String ownRepository(String name) {
+      final path = p.join(scratch.path, name);
+      Directory(path).createSync(recursive: true);
+      git(['init', '-q', '-b', 'main'], cwd: path);
+      git(['config', 'user.name', 'A'], cwd: path);
+      git(['config', 'user.email', 'a@x'], cwd: path);
+      File(p.join(path, 'a.txt')).writeAsStringSync('one\n');
+      git(['add', '.'], cwd: path);
+      git(['commit', '-q', '-m', 'first'], cwd: path);
+      return path;
+    }
+
+    test('pushes the current branch to a bare repository', () async {
+      final source = ownRepository('push-source');
+      final bare = p.join(scratch.path, 'push-target.git');
+      Process.runSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
+
+      await service.addRemote(source, 'target', bare);
+      final outcome = await service.pushRemote(source, 'target');
+
+      expect(outcome.ok, isTrue, reason: '${outcome.rejected}${outcome.error}');
+      expect(outcome.objectsSent, greaterThan(0));
+      expect(outcome.updated.single, contains('refs/heads/main'));
+
+      // git's opinion of what it received.
+      expect(
+        git(['rev-parse', 'refs/heads/main'], cwd: bare).trim(),
+        git(['rev-parse', 'HEAD'], cwd: source).trim(),
+      );
+      expect(git(['fsck', '--no-progress'], cwd: bare), isNotNull);
+
+      // Pushing again sends nothing.
+      final again = await service.pushRemote(source, 'target');
+      expect(again.ok, isTrue);
+      expect(again.objectsSent, 0);
+    });
+
+    test('a push that would overwrite is refused until it is forced',
+        () async {
+      final source = ownRepository('force-source');
+      final bare = p.join(scratch.path, 'force-target.git');
+      Process.runSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
+
+      await service.addRemote(source, 'force', bare);
+      await service.pushRemote(source, 'force');
+      final before = git(['rev-parse', 'main'], cwd: bare).trim();
+
+      // A second commit on the source, then a rewrite that drops it.
+      File(p.join(source, 'a.txt')).writeAsStringSync('two\n');
+      git(['commit', '-q', '-am', 'second'], cwd: source);
+      await service.pushRemote(source, 'force');
+
+      git(['reset', '--quiet', '--hard', 'HEAD~1'], cwd: source);
+      File(p.join(source, 'a.txt')).writeAsStringSync('rewritten\n');
+      git(['commit', '-q', '-am', 'rewritten'], cwd: source);
+      await service.refresh(source);
+
+      final refused = await service.pushRemote(source, 'force');
+      expect(refused.ok, isFalse);
+      expect(refused.canForce, isTrue);
+      expect(git(['rev-parse', 'main'], cwd: bare).trim(), isNot(before));
+
+      final forced = await service.pushRemote(source, 'force', force: true);
+      expect(forced.ok, isTrue);
+      expect(
+        git(['rev-parse', 'main'], cwd: bare).trim(),
+        git(['rev-parse', 'HEAD'], cwd: source).trim(),
+      );
+    });
+    test('pulls: fetches, then merges what arrived', () async {
+      // An origin that moves on while this repository also moves on — the
+      // case that needs a real merge rather than a fast-forward.
+      final origin = p.join(scratch.path, 'pull-origin');
+      Directory(origin).createSync(recursive: true);
+      git(['init', '-q', '-b', 'main'], cwd: origin);
+      git(['config', 'user.name', 'B'], cwd: origin);
+      git(['config', 'user.email', 'b@x'], cwd: origin);
+      File(p.join(origin, 'shared.txt')).writeAsStringSync('base\n');
+      git(['add', '.'], cwd: origin);
+      git(['commit', '-q', '-m', 'base'], cwd: origin);
+
+      // A local clone of it, made with git so the setup is not in question.
+      final local = p.join(scratch.path, 'pull-local');
+      Process.runSync('git', ['clone', '-q', origin, local]);
+      git(['config', 'user.name', 'A'], cwd: local);
+      git(['config', 'user.email', 'a@x'], cwd: local);
+
+      // Each side changes a different file.
+      File(p.join(origin, 'theirs.txt')).writeAsStringSync('theirs\n');
+      git(['add', '.'], cwd: origin);
+      git(['commit', '-q', '-m', 'theirs'], cwd: origin);
+
+      File(p.join(local, 'ours.txt')).writeAsStringSync('ours\n');
+      git(['add', '.'], cwd: local);
+      git(['commit', '-q', '-m', 'ours'], cwd: local);
+
+      final outcome = await service.pullRemote(local, 'origin');
+
+      expect(outcome.error, isNull);
+      expect(outcome.conflicts, isEmpty);
+      expect(outcome.mergeOutcome, 'merged');
+
+      // Both sides' work is present and git is content.
+      expect(File(p.join(local, 'ours.txt')).existsSync(), isTrue);
+      expect(File(p.join(local, 'theirs.txt')).existsSync(), isTrue);
+      expect(git(['status', '--porcelain'], cwd: local), isEmpty);
+      expect(git(['fsck', '--no-progress'], cwd: local), isNotNull);
+      expect(
+        git(['log', '-1', '--format=%P'], cwd: local).trim().split(' '),
+        hasLength(2),
+      );
+    });
+
+    test('a remote this build cannot reach says so rather than failing later',
+        () async {
+      final remotes =
+          await service.addRemote(repoPath, 'ssh', 'git@example.invalid:x.git');
+      expect(remotes.single.canFetch, isFalse);
+
+      // Asking anyway is an outcome with a reason, not a crash.
+      final outcome = await service.fetchRemote(repoPath, 'ssh');
+      expect(outcome.error, isNotNull);
+
+      await service.removeRemote(repoPath, 'ssh');
+    });
+
     test('a failure comes back as a failed future, not a dead worker',
         () async {
       await expectLater(

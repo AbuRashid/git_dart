@@ -55,6 +55,30 @@ void main() {
     expect(config['user.name'], 'A  B');
   });
 
+  test('a Windows path survives being written and read back', () {
+    // Escapes must be read in one pass: replacing `\\` first leaves a
+    // backslash the next rule reads as an escape, which turned
+    // `C:\temp\twice` into `C:\temp<tab>wice`.
+    const path = r'C:\Users\a\AppData\Local\Temp\twice.git';
+    final written = GitConfig.parse(
+      '[remote "origin"]\n\turl = ${RemoteStore.escapeConfigValue(path)}\n',
+    );
+    expect(written['remote.origin.url'], path);
+
+    // And git reads the same file the same way.
+    final repository = p.join(scratch.path, 'escapes');
+    Process.runSync('git', ['init', '-q', repository]);
+    Process.runSync(
+      'git',
+      ['remote', 'add', 'origin', path],
+      workingDirectory: repository,
+    );
+    expect(
+      GitConfig.forRepository(p.join(repository, '.git'))['remote.origin.url'],
+      gitConfig('remote.origin.url', cwd: repository),
+    );
+  });
+
   test('a key with no value is true, as git treats it', () {
     final config = GitConfig.parse('[core]\n\tbare\n');
     expect(config.boolean('core.bare'), isTrue);

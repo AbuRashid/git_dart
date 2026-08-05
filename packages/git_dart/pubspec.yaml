@@ -9,6 +9,10 @@ environment:
   sdk: ^3.0.0
 
 dependencies:
+  # A pure-Dart inflate that reports how much input it consumed. dart:io's
+  # zlib does not, and a packfile does not record where a compressed object
+  # ends — so without this there is no way to find the next one.
+  archive: ^3.6.1
   crypto: ^3.0.3
   path: ^1.9.0
 

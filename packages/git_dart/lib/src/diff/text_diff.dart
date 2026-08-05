@@ -153,6 +153,18 @@ TextDiff diffText(
   return TextDiff(hunks: _toHunks(script, context));
 }
 
+/// The edit script between two lists of lines, or null when they are further
+/// apart than [maxEdits].
+///
+/// The hunks a reader sees are built from this; a merge needs it whole, since
+/// it has to know which regions of the base each side replaced.
+List<DiffLine>? editScript(
+  List<String> before,
+  List<String> after, {
+  int maxEdits = 20000,
+}) =>
+    _myers(before, after, maxEdits);
+
 /// Myers' difference algorithm: walk the edit graph one edit-distance at a
 /// time and keep each step, then trace the path back.
 ///

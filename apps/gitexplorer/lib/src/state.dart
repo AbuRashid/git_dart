@@ -220,6 +220,266 @@ class ExplorerState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---- branches -----------------------------------------------------------
+
+  /// Renames a branch, keeping the name the row shows in step.
+  ///
+  /// Returns null when it was refused — [error] then says why, which is
+  /// usually a name git will not accept or one already taken.
+  Future<bool> renameBranch(String repository, String from, String to) async {
+    try {
+      _summaries[repository] = await _git.renameBranch(repository, from, to);
+      _error = null;
+      notifyListeners();
+      return true;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      notifyListeners();
+      return false;
+    }
+  }
+
+  Future<bool> deleteBranch(String repository, String name) async {
+    try {
+      _summaries[repository] = await _git.deleteBranch(repository, name);
+      _error = null;
+      notifyListeners();
+      return true;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      notifyListeners();
+      return false;
+    }
+  }
+
+  // ---- settings -----------------------------------------------------------
+
+  final _settings = <String, SettingValue>{};
+
+  SettingValue? settingFor(String key) => _settings[key];
+
+  /// Reads the settings the screen shows, for the repository whose config is
+  /// being looked at.
+  Future<void> loadSettings(String repository, List<String> keys) async {
+    try {
+      for (final value in await _git.settings(repository, keys)) {
+        _settings[value.key] = value;
+      }
+      _error = null;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+    }
+    notifyListeners();
+  }
+
+  /// Writes one setting, or clears it when [value] is null.
+  Future<void> writeSetting(
+    String repository,
+    String key,
+    String? value,
+    int scope,
+  ) async {
+    try {
+      for (final written
+          in await _git.writeSetting(repository, key, value, scope)) {
+        _settings[written.key] = written;
+      }
+      _error = null;
+      // A setting can change what the repository reports — the identity a
+      // commit would carry, which files are ignored — so the view is re-read.
+      await _refreshOpenRepository(repository);
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+    }
+    notifyListeners();
+  }
+
+  Future<void> _refreshOpenRepository(String repository) async {
+    final saved = _saved.where((r) => r.path == repository).firstOrNull;
+    if (saved != null) await _refreshSummary(saved);
+    if (_selection case RepositorySelected(:final repositoryPath)
+        when repositoryPath == repository) {
+      try {
+        _staging = await _git.staging(repository);
+      } on GitWorkerException {
+        // The staging panel is a nicety here; a failure to refresh it must
+        // not undo the setting that was just written.
+      }
+    }
+  }
+
+  // ---- remotes ------------------------------------------------------------
+
+  List<RemoteData>? _remotes;
+  FetchOutcome? _lastFetch;
+  String? _fetching;
+
+  List<RemoteData>? get remotes => _remotes;
+  FetchOutcome? get lastFetch => _lastFetch;
+
+  /// The remote currently being fetched, or null. A fetch waits on a network,
+  /// so it is reported as pending rather than hidden.
+  String? get fetching => _fetching;
+
+  Future<void> loadRemotes(String repository) async {
+    try {
+      _remotes = await _git.remotes(repository);
+      _error = null;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+    }
+    notifyListeners();
+  }
+
+  Future<void> addRemote(String repository, String name, String url) async {
+    try {
+      _remotes = await _git.addRemote(repository, name, url);
+      _error = null;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+    }
+    notifyListeners();
+  }
+
+  Future<void> removeRemote(String repository, String name) async {
+    try {
+      _remotes = await _git.removeRemote(repository, name);
+      _error = null;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+    }
+    notifyListeners();
+  }
+
+  /// Fetches, and reports what arrived.
+  Future<FetchOutcome?> fetchRemote(
+    String repository,
+    String name, {
+    String? username,
+    String? password,
+    bool remember = false,
+  }) async {
+    _fetching = name;
+    _lastFetch = null;
+    notifyListeners();
+    try {
+      final outcome = await _git.fetchRemote(
+        repository,
+        name,
+        username: username,
+        password: password,
+        remember: remember,
+      );
+      _lastFetch = outcome;
+      // Needing credentials is a question, not a failure.
+      _error = outcome.needsCredentials ? null : outcome.error;
+      // Tracking refs moved, so the branch list and the counts are stale.
+      await _afterIndexChange(repository);
+      return outcome;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      return null;
+    } finally {
+      _fetching = null;
+      notifyListeners();
+    }
+  }
+
+  PullOutcome? _lastPull;
+  String? _pulling;
+
+  PullOutcome? get lastPull => _lastPull;
+  String? get pulling => _pulling;
+
+  /// Fetches and merges. Returns the outcome, or null when the worker failed.
+  Future<PullOutcome?> pullRemote(
+    String repository,
+    String name, {
+    String? username,
+    String? password,
+    bool remember = false,
+  }) async {
+    _pulling = name;
+    _lastPull = null;
+    _lastFetch = null;
+    notifyListeners();
+    try {
+      final outcome = await _git.pullRemote(
+        repository,
+        name,
+        username: username,
+        password: password,
+        remember: remember,
+      );
+      _lastPull = outcome;
+      _error = outcome.fetch.needsCredentials ? null : outcome.error;
+      await _afterIndexChange(repository);
+      return outcome;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      return null;
+    } finally {
+      _pulling = null;
+      notifyListeners();
+    }
+  }
+
+  void dismissLastPull() {
+    _lastPull = null;
+    notifyListeners();
+  }
+
+  void dismissLastFetch() {
+    _lastFetch = null;
+    notifyListeners();
+  }
+
+  PushOutcome? _lastPush;
+  String? _pushing;
+
+  PushOutcome? get lastPush => _lastPush;
+  String? get pushing => _pushing;
+
+  /// Pushes the current branch. [force] overwrites a remote branch holding
+  /// commits this one does not — never assumed, only asked for.
+  Future<PushOutcome?> pushRemote(
+    String repository,
+    String name, {
+    bool force = false,
+    String? username,
+    String? password,
+    bool remember = false,
+  }) async {
+    _pushing = name;
+    _lastPush = null;
+    notifyListeners();
+    try {
+      final outcome = await _git.pushRemote(
+        repository,
+        name,
+        force: force,
+        username: username,
+        password: password,
+        remember: remember,
+      );
+      _lastPush = outcome;
+      _error = outcome.needsCredentials ? null : outcome.error;
+      await _afterIndexChange(repository);
+      return outcome;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      return null;
+    } finally {
+      _pushing = null;
+      notifyListeners();
+    }
+  }
+
+  void dismissLastPush() {
+    _lastPush = null;
+    notifyListeners();
+  }
+
   // ---- ignoring -----------------------------------------------------------
 
   /// How many paths the index holds at or under [path].
@@ -596,6 +856,7 @@ class ExplorerState extends ChangeNotifier {
 
     try {
       _staging = await _git.staging(repositoryPath);
+      _remotes = await _git.remotes(repositoryPath);
       _history = await _git.history(repositoryPath, limit: 200);
     } on GitWorkerException catch (failure) {
       _error = failure.message;

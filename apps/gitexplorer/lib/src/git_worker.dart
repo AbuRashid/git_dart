@@ -19,6 +19,7 @@ import 'dart:typed_data';
 import 'package:git_dart/git_dart.dart' as git;
 import 'package:path/path.dart' as p;
 
+import 'credential_store.dart';
 import 'generated/tokens.dart';
 import 'models.dart';
 
@@ -173,6 +174,118 @@ class CountTracked extends GitRequest {
   const CountTracked(this.repositoryPath, this.path);
 }
 
+class LoadRemotes extends GitRequest {
+  final String repositoryPath;
+  const LoadRemotes(this.repositoryPath);
+}
+
+class AddRemote extends GitRequest {
+  final String repositoryPath;
+  final String name;
+  final String url;
+  const AddRemote(this.repositoryPath, this.name, this.url);
+}
+
+class RemoveRemote extends GitRequest {
+  final String repositoryPath;
+  final String name;
+  const RemoveRemote(this.repositoryPath, this.name);
+}
+
+class FetchRemote extends GitRequest {
+  final String repositoryPath;
+  final String name;
+
+  /// Supplied after the user was asked; null means "use whatever is saved".
+  final String? username;
+  final String? password;
+
+  /// Whether a secret that works should be handed to the credential helper.
+  final bool remember;
+
+  const FetchRemote(
+    this.repositoryPath,
+    this.name, {
+    this.username,
+    this.password,
+    this.remember = false,
+  });
+}
+
+class PullRemote extends GitRequest {
+  final String repositoryPath;
+  final String name;
+  final String? username;
+  final String? password;
+  final bool remember;
+
+  const PullRemote(
+    this.repositoryPath,
+    this.name, {
+    this.username,
+    this.password,
+    this.remember = false,
+  });
+}
+
+class PushRemote extends GitRequest {
+  final String repositoryPath;
+  final String name;
+
+  /// Overwrites a remote branch that has commits the pushed one does not.
+  /// Asked for explicitly, never assumed.
+  final bool force;
+
+  final String? username;
+  final String? password;
+  final bool remember;
+
+  const PushRemote(
+    this.repositoryPath,
+    this.name, {
+    this.force = false,
+    this.username,
+    this.password,
+    this.remember = false,
+  });
+}
+
+class RenameBranch extends GitRequest {
+  final String repositoryPath;
+  final String from;
+  final String to;
+  const RenameBranch(this.repositoryPath, this.from, this.to);
+}
+
+class DeleteBranch extends GitRequest {
+  final String repositoryPath;
+  final String name;
+  const DeleteBranch(this.repositoryPath, this.name);
+}
+
+/// Everything the settings screen shows: the value in force for each key it
+/// knows, and which file it came from.
+class LoadSettings extends GitRequest {
+  final String repositoryPath;
+  final List<String> keys;
+  const LoadSettings(this.repositoryPath, this.keys);
+}
+
+/// Writes or clears one setting.
+class WriteSetting extends GitRequest {
+  final String repositoryPath;
+  final String key;
+
+  /// Null clears it, so whatever a wider scope says applies again.
+  final String? value;
+
+  /// 0 system, 1 global, 2 local — the index of ConfigScope, since the enum
+  /// itself lives in the library.
+  final int scope;
+
+  const WriteSetting(this.repositoryPath, this.key, this.value, this.scope);
+}
+
 /// Drops cached state so the next question is answered from disk.
 class Refresh extends GitRequest {
   final String repositoryPath;
@@ -202,10 +315,14 @@ void gitWorkerMain(SendPort toMain) {
 
   final worker = _Worker();
 
-  inbox.listen((message) {
+  inbox.listen((message) async {
     if (message is! _Envelope) return;
     try {
-      toMain.send(_Reply(message.id, worker.handle(message.request), null));
+      // Most handlers are synchronous; a fetch is not, and waits on a network
+      // that may never answer.
+      final result = worker.handle(message.request);
+      final value = result is Future ? await result : result;
+      toMain.send(_Reply(message.id, value, null));
     } catch (error) {
       // A failure is a reply, not a crash: one bad repository must not take
       // the worker down and with it every other repository's state.
@@ -223,6 +340,16 @@ class _Worker {
         InitialiseRepository() => _initialise(request),
         WriteFile() => _write(request),
         CreateEntry() => _create(request),
+        RenameBranch() => _renameBranch(request),
+        DeleteBranch() => _deleteBranch(request),
+        LoadSettings() => _settings(request),
+        WriteSetting() => _writeSetting(request),
+        LoadRemotes() => _remotes(request),
+        AddRemote() => _addRemote(request),
+        RemoveRemote() => _removeRemote(request),
+        FetchRemote() => _fetch(request),
+        PushRemote() => _push(request),
+        PullRemote() => _pull(request),
         IgnorePath() => _ignore(request),
         CountTracked() => _countTracked(request),
         LoadStaging() => _staging(request),
@@ -323,6 +450,325 @@ class _Worker {
     final config = git.GitConfig.forRepository(p.join(path, '.git'));
     final configured = config['init.defaultbranch'];
     return configured == null || configured.isEmpty ? 'main' : configured;
+  }
+
+  // ---- branches -----------------------------------------------------------
+
+  RepositorySummary _renameBranch(RenameBranch request) {
+    final repo = _repository(request.repositoryPath);
+    repo.renameBranch(request.from, request.to);
+    _statuses.remove(request.repositoryPath);
+    return _open(OpenRepository(
+      request.repositoryPath,
+      p.basename(p.normalize(request.repositoryPath)),
+    ));
+  }
+
+  RepositorySummary _deleteBranch(DeleteBranch request) {
+    final repo = _repository(request.repositoryPath);
+    repo.deleteBranch(request.name);
+    return _open(OpenRepository(
+      request.repositoryPath,
+      p.basename(p.normalize(request.repositoryPath)),
+    ));
+  }
+
+  // ---- settings -----------------------------------------------------------
+
+  List<SettingValue> _settings(LoadSettings request) {
+    final repo = _repository(request.repositoryPath);
+    final writer = git.ConfigWriter(repo.gitDirectory);
+
+    return [
+      for (final key in request.keys)
+        () {
+          final origin = writer.origin(key);
+          return SettingValue(
+            key: key,
+            value: origin?.value,
+            scope: origin?.scope.index,
+            scopeLabel: origin?.scope.label,
+          );
+        }(),
+    ];
+  }
+
+  List<SettingValue> _writeSetting(WriteSetting request) {
+    final repo = _repository(request.repositoryPath);
+    final writer = git.ConfigWriter(repo.gitDirectory);
+    final scope = git.ConfigScope.values[request.scope];
+
+    if (request.value == null || request.value!.isEmpty) {
+      writer.unset(request.key, scope);
+    } else {
+      writer.set(request.key, request.value!, scope);
+    }
+
+    // The repository caches its config, and a setting just changed.
+    repo.reloadConfig();
+    _statuses.remove(request.repositoryPath);
+    return _settings(LoadSettings(request.repositoryPath, [request.key]));
+  }
+
+  // ---- remotes ------------------------------------------------------------
+
+  /// Ahead/behind counts, kept by the pair of commits they describe.
+  ///
+  /// Counting walks both histories, so it is not something to redo on every
+  /// rebuild. The key is the two tips: when either moves the answer is
+  /// recomputed, and when neither has, it cannot have changed.
+  final _divergence = <String, ({int ahead, int behind})?>{};
+
+  List<RemoteData> _remotes(LoadRemotes request) {
+    final repo = _repository(request.repositoryPath);
+    final branch = repo.refs.currentBranch?.replaceFirst('refs/heads/', '');
+    final localTip = branch == null ? null : repo.refs.resolve('refs/heads/$branch');
+
+    return [
+      for (final remote in repo.remotes.list())
+        () {
+          final canFetch = remote.isLocal ||
+              remote.url.startsWith('http://') ||
+              remote.url.startsWith('https://');
+
+          // The tracking ref for the branch that is checked out, which is
+          // what the counts are about.
+          final trackingRef = branch == null
+              ? null
+              : remote.trackingRefFor('refs/heads/$branch');
+          final remoteTip =
+              trackingRef == null ? null : repo.refs.resolve(trackingRef);
+
+          if (localTip == null || remoteTip == null) {
+            // Nothing under refs/remotes/<name> at all means this repository
+            // has never fetched from it — which is a different situation from
+            // the remote not having this branch, and wants different advice.
+            final anyTracking = repo.refs
+                .list(prefix: 'refs/remotes/${remote.name}/')
+                .isNotEmpty;
+            return RemoteData(
+              name: remote.name,
+              url: remote.url,
+              isLocal: remote.isLocal,
+              canFetch: canFetch,
+              trackingRef: remoteTip == null ? null : trackingRef,
+              neverFetched: !anyTracking,
+            );
+          }
+
+          final key = '${localTip.hex}:${remoteTip.hex}';
+          final counts = _divergence.containsKey(key)
+              ? _divergence[key]
+              : _divergence[key] = () {
+                  final measured = repo.countAheadBehind(localTip, remoteTip);
+                  return measured == null
+                      ? null
+                      : (ahead: measured.ahead, behind: measured.behind);
+                }();
+
+          return RemoteData(
+            name: remote.name,
+            url: remote.url,
+            isLocal: remote.isLocal,
+            canFetch: canFetch,
+            trackingRef: trackingRef,
+            ahead: counts?.ahead,
+            behind: counts?.behind,
+            tooLargeToCount: counts == null,
+          );
+        }(),
+    ];
+  }
+
+  List<RemoteData> _addRemote(AddRemote request) {
+    _repository(request.repositoryPath)
+        .remotes
+        .add(request.name, request.url);
+    return _remotes(LoadRemotes(request.repositoryPath));
+  }
+
+  List<RemoteData> _removeRemote(RemoveRemote request) {
+    _repository(request.repositoryPath).remotes.remove(request.name);
+    return _remotes(LoadRemotes(request.repositoryPath));
+  }
+
+  final _credentials = CredentialStore();
+
+  /// The `user@` part of a URL, when it has one and can be parsed at all.
+  static String? _usernameIn(String url) {
+    if (!url.startsWith('http://') && !url.startsWith('https://')) return null;
+    return git.splitCredentials(url).credentials?.username;
+  }
+
+  /// The secret to try: what the user just typed, else what is saved.
+  Future<git.Credentials?> _credentialsFor(
+    String url,
+    String? username,
+    String? password,
+  ) async {
+    // Only http(s) has anywhere to put them. An ssh-style `git@host:path` is
+    // not even a URL — parsing one throws — so it is turned away here rather
+    // than deeper in.
+    if (!url.startsWith('http://') && !url.startsWith('https://')) return null;
+    if (username != null && password != null) {
+      return git.Credentials(username: username, password: password);
+    }
+    return _credentials.lookup(url);
+  }
+
+  Future<FetchOutcome> _fetch(FetchRemote request) async {
+    final repo = _repository(request.repositoryPath);
+    final remote = repo.remotes.named(request.name);
+    if (remote == null) {
+      return FetchOutcome(
+        remote: request.name,
+        error: 'there is no remote named ${request.name}',
+      );
+    }
+
+    final credentials = await _credentialsFor(
+      remote.url,
+      request.username,
+      request.password,
+    );
+
+    try {
+      final result = await git.fetch(repo, remote, credentials: credentials);
+      _statuses.remove(request.repositoryPath);
+      if (credentials != null && request.remember) {
+        await _credentials.save(remote.url, credentials);
+      }
+      return FetchOutcome(
+        remote: request.name,
+        objectsReceived: result.objectsReceived,
+        updated: [for (final update in result.changed) update.toString()],
+      );
+    } on git.AuthenticationRequired catch (needed) {
+      // A saved secret that the server refused is dropped, or the next
+      // attempt fails the same way with the same token.
+      if (needed.wereRejected && credentials != null) {
+        await _credentials.discard(remote.url, credentials);
+      }
+      return FetchOutcome(
+        remote: request.name,
+        needsCredentials: true,
+        wereRejected: needed.wereRejected,
+        username: credentials?.username ?? _usernameIn(remote.url),
+        canSave: await _credentials.canSave(),
+        error: needed.toString(),
+      );
+    } catch (error) {
+      // A remote that is unreachable, or speaks a protocol this build does
+      // not, is an outcome rather than a crash.
+      return FetchOutcome(remote: request.name, error: '$error');
+    }
+  }
+
+  /// Fetch, then merge what arrived — which is what a pull has always been.
+  Future<PullOutcome> _pull(PullRemote request) async {
+    final fetched = await _fetch(FetchRemote(
+      request.repositoryPath,
+      request.name,
+      username: request.username,
+      password: request.password,
+      remember: request.remember,
+    ));
+
+    if (fetched.error != null || fetched.needsCredentials) {
+      return PullOutcome(remote: request.name, fetch: fetched);
+    }
+
+    final repo = _repository(request.repositoryPath);
+    final remote = repo.remotes.named(request.name);
+    final branch = repo.refs.currentBranch?.replaceFirst('refs/heads/', '');
+    if (remote == null || branch == null) {
+      return PullOutcome(
+        remote: request.name,
+        fetch: fetched,
+        error: 'there is no branch checked out to merge into',
+      );
+    }
+
+    final tracking = remote.trackingRefFor('refs/heads/$branch');
+    if (tracking == null || repo.refs.resolve(tracking) == null) {
+      return PullOutcome(
+        remote: request.name,
+        fetch: fetched,
+        error: '${request.name} has no copy of $branch to merge',
+      );
+    }
+
+    try {
+      final merged = await git.mergeTrackingRef(repo, tracking);
+      _statuses.remove(request.repositoryPath);
+      return PullOutcome(
+        remote: request.name,
+        fetch: fetched,
+        mergeOutcome: merged.outcome.name,
+        conflicts: merged.conflicts,
+        mergedCommit: merged.commit?.hex,
+      );
+    } catch (error) {
+      return PullOutcome(
+        remote: request.name,
+        fetch: fetched,
+        error: '$error',
+      );
+    }
+  }
+
+  Future<PushOutcome> _push(PushRemote request) async {
+    final repo = _repository(request.repositoryPath);
+    final remote = repo.remotes.named(request.name);
+    if (remote == null) {
+      return PushOutcome(
+        remote: request.name,
+        error: 'there is no remote named ${request.name}',
+      );
+    }
+
+    final credentials = await _credentialsFor(
+      remote.pushUrl,
+      request.username,
+      request.password,
+    );
+
+    try {
+      final result = await git.push(
+        repo,
+        remote,
+        force: request.force,
+        credentials: credentials,
+      );
+      if (credentials != null && request.remember) {
+        await _credentials.save(remote.pushUrl, credentials);
+      }
+      return PushOutcome(
+        remote: request.name,
+        objectsSent: result.objectsSent,
+        updated: [
+          for (final status in result.statuses)
+            if (status.ok) status.toString(),
+        ],
+        rejected: [
+          for (final status in result.rejected) status.toString(),
+        ],
+      );
+    } on git.AuthenticationRequired catch (needed) {
+      if (needed.wereRejected && credentials != null) {
+        await _credentials.discard(remote.pushUrl, credentials);
+      }
+      return PushOutcome(
+        remote: request.name,
+        needsCredentials: true,
+        wereRejected: needed.wereRejected,
+        username: credentials?.username ?? _usernameIn(remote.pushUrl),
+        canSave: await _credentials.canSave(),
+        error: needed.toString(),
+      );
+    } catch (error) {
+      return PushOutcome(remote: request.name, error: '$error');
+    }
   }
 
   // ---- ignoring -----------------------------------------------------------
@@ -979,6 +1425,90 @@ class GitService {
 
   Future<int> trackedCount(String repository, String path) =>
       _ask(CountTracked(repository, path));
+
+  Future<RepositorySummary> renameBranch(
+    String repository,
+    String from,
+    String to,
+  ) =>
+      _ask(RenameBranch(repository, from, to));
+
+  Future<RepositorySummary> deleteBranch(String repository, String name) =>
+      _ask(DeleteBranch(repository, name));
+
+  Future<List<SettingValue>> settings(
+    String repository,
+    List<String> keys,
+  ) =>
+      _ask(LoadSettings(repository, keys));
+
+  Future<List<SettingValue>> writeSetting(
+    String repository,
+    String key,
+    String? value,
+    int scope,
+  ) =>
+      _ask(WriteSetting(repository, key, value, scope));
+
+  Future<List<RemoteData>> remotes(String repository) =>
+      _ask(LoadRemotes(repository));
+
+  Future<List<RemoteData>> addRemote(
+    String repository,
+    String name,
+    String url,
+  ) =>
+      _ask(AddRemote(repository, name, url));
+
+  Future<List<RemoteData>> removeRemote(String repository, String name) =>
+      _ask(RemoveRemote(repository, name));
+
+  Future<FetchOutcome> fetchRemote(
+    String repository,
+    String name, {
+    String? username,
+    String? password,
+    bool remember = false,
+  }) =>
+      _ask(FetchRemote(
+        repository,
+        name,
+        username: username,
+        password: password,
+        remember: remember,
+      ));
+
+  Future<PullOutcome> pullRemote(
+    String repository,
+    String name, {
+    String? username,
+    String? password,
+    bool remember = false,
+  }) =>
+      _ask(PullRemote(
+        repository,
+        name,
+        username: username,
+        password: password,
+        remember: remember,
+      ));
+
+  Future<PushOutcome> pushRemote(
+    String repository,
+    String name, {
+    bool force = false,
+    String? username,
+    String? password,
+    bool remember = false,
+  }) =>
+      _ask(PushRemote(
+        repository,
+        name,
+        force: force,
+        username: username,
+        password: password,
+        remember: remember,
+      ));
 
   Future<StagingArea> staging(String repository) =>
       _ask(LoadStaging(repository));

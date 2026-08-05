@@ -191,7 +191,8 @@ void main() {
     final state = await pumpExplorer(tester);
     await act(tester, () => state.selectRepository(repoPath));
 
-    expect(find.textContaining('History'), findsWidgets);
+    // History is the tab a repository opens on.
+    expect(find.text('History'), findsOneWidget);
     expect(find.text('first commit'), findsOneWidget);
     expect(find.textContaining('changed'), findsWidgets); // a fact chip
     expect(find.text('Working tree'), findsOneWidget); // the revision button
@@ -376,6 +377,83 @@ void main() {
     expect(Theme.of(context).brightness, Brightness.light);
     expect(tester.widget<Text>(find.text('M')).style?.color,
         statusColor(FileState.modified, context));
+  });
+
+  group('branches and settings', () {
+    testWidgets('a branch can be renamed from the repository pane',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      git(['branch', 'to-rename']);
+      await act(tester, () => state.refresh(repoPath));
+      await act(tester, () => state.selectRepository(repoPath));
+
+      await tapAndWait(tester, find.byWidgetPredicate((w) => w is Tab && (w.text ?? '').startsWith('Branches')));
+      expect(find.text('to-rename'), findsOneWidget);
+      expect(find.text('checked out'), findsOneWidget);
+
+      await tapAndWait(
+        tester,
+        find.descendant(
+          of: find.widgetWithText(ListTile, 'to-rename'),
+          matching: find.byIcon(Icons.more_vert),
+        ),
+      );
+      await tapAndWait(tester, find.text('Rename…'));
+
+      await tester.enterText(find.byType(TextField).last, 'feature/renamed');
+      await tapAndWait(tester, find.text('Rename'));
+
+      expect(
+        git(['branch', '--format=%(refname:short)']).trim().split('\n'),
+        ['feature/renamed', 'main'],
+      );
+      expect(find.textContaining('Renamed to-rename'), findsOneWidget);
+
+      git(['branch', '-D', 'feature/renamed']);
+    });
+
+    testWidgets('a name git would refuse is reported, and nothing changes',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      final before = git(['branch', '--format=%(refname:short)']).trim();
+
+      // Through act: a worker reply never arrives inside the fake-async zone.
+      var renamed = true;
+      await act(tester, () async {
+        renamed = await state.renameBranch(repoPath, 'main', 'has space');
+      });
+
+      expect(renamed, isFalse);
+      expect(state.error, isNotNull);
+      expect(git(['branch', '--format=%(refname:short)']).trim(), before);
+    });
+
+    testWidgets('settings open, grouped, and write to the repository',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      await act(tester, () => state.selectRepository(repoPath));
+
+      await tapAndWait(tester, find.byIcon(Icons.settings_outlined));
+
+      // The side tabs, and the first category's content.
+      expect(find.text('Identity'), findsWidgets);
+      expect(find.text('Branches'), findsWidgets);
+      expect(find.text('user.name'), findsOneWidget);
+
+      // An unset value says what git will do rather than showing a default.
+      await tapAndWait(tester, find.text('Network').last);
+      expect(find.textContaining('Not set — git uses'), findsWidgets);
+
+      // Writing goes to this repository's config, and git reads it back.
+      await act(
+        tester,
+        () => state.writeSetting(repoPath, 'user.name', 'Set From The App', 2),
+      );
+      expect(git(['config', '--local', '--get', 'user.name']).trim(),
+          'Set From The App');
+
+      git(['config', '--local', 'user.name', 'A']);
+    });
   });
 
   group('context menus', () {
@@ -679,8 +757,12 @@ void main() {
       final state = await pumpExplorer(tester);
       await act(tester, () => state.selectRepository(repoPath));
 
-      expect(find.textContaining('Staged'), findsWidgets);
-      expect(find.textContaining('Not staged'), findsOneWidget);
+      // The staging area is its own tab now, and the commit box lives only
+      // there.
+      await tapAndWait(tester, find.widgetWithText(Tab, 'Staged'));
+
+      expect(find.textContaining('Staged ('), findsWidgets);
+      expect(find.textContaining('Not staged ('), findsWidgets);
       expect(find.text('Nothing staged yet.'), findsOneWidget);
 
       await act(
@@ -703,6 +785,7 @@ void main() {
         (tester) async {
       final state = await pumpExplorer(tester);
       await act(tester, () => state.selectRepository(repoPath));
+      await tapAndWait(tester, find.widgetWithText(Tab, 'Staged'));
       await act(
         tester,
         () => state.setStaged(repoPath, 'scratch.txt', staged: true),
@@ -722,6 +805,28 @@ void main() {
       // Reported afterwards, by name (`care.reported`).
       expect(find.textContaining('Committed'), findsOneWidget);
       expect(find.textContaining('add scratch'), findsWidgets);
+      // On a card of its own: a bare line of text reads as part of the form
+      // above it, and what was just written deserves to be seen.
+      expect(
+        find.ancestor(
+          of: find.textContaining('Committed'),
+          matching: find.byType(Card),
+        ),
+        findsOneWidget,
+      );
+      // With its tick, as a mark of its own rather than more green text.
+      final card = find.ancestor(
+        of: find.textContaining('Committed'),
+        matching: find.byType(Card),
+      );
+      expect(
+        find.descendant(of: card, matching: find.byIcon(Icons.check)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: card, matching: find.byType(CircleAvatar)),
+        findsOneWidget,
+      );
       // And the history it joined is refreshed.
       expect(state.history!.first.summary, 'add scratch');
 
@@ -734,6 +839,7 @@ void main() {
         'to commit and something to say', (tester) async {
       final state = await pumpExplorer(tester);
       await act(tester, () => state.selectRepository(repoPath));
+      await tapAndWait(tester, find.widgetWithText(Tab, 'Staged'));
 
       FilledButton commitButton() => tester.widget<FilledButton>(
             find.widgetWithText(FilledButton, 'Commit 0 files'),
@@ -770,6 +876,7 @@ void main() {
         (tester) async {
       final state = await pumpExplorer(tester);
       await act(tester, () => state.selectRepository(repoPath));
+      await tapAndWait(tester, find.widgetWithText(Tab, 'Staged'));
 
       final before = git(['rev-parse', 'HEAD']).trim();
       await act(

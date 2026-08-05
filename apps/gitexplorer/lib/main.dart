@@ -84,7 +84,7 @@ class ExplorerPage extends StatelessWidget {
 
           return Scaffold(
             appBar: AppBar(
-              title: const Text('Repositories'),
+              title: const Text('Git Explorer'),
               leading: !wide && showingDetail
                   ? IconButton(
                       icon: const Icon(Icons.arrow_back),
@@ -92,14 +92,9 @@ class ExplorerPage extends StatelessWidget {
                       onPressed: state.clearSelection,
                     )
                   : null,
-              actions: [
-                ThemeButton(state: state),
-                IconButton(
-                  icon: const Icon(Icons.add),
-                  tooltip: 'Add a repository',
-                  onPressed: () => addRepository(context, state),
-                ),
-              ],
+              // Adding a repository belongs beside the list it adds to, not
+              // in the window's bar, so it lives in the tree pane's header.
+              actions: [ThemeButton(state: state)],
             ),
             body: wide
                 ? Row(

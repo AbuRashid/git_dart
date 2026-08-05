@@ -5,6 +5,7 @@ import '../generated/tokens.dart';
 import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
+import 'settings_page.dart';
 
 /// What is selected, shown in full.
 class DetailPane extends StatelessWidget {
@@ -197,33 +198,106 @@ class _RepositoryDetail extends StatelessWidget {
               onPressed: () => state.refresh(repositoryPath),
               icon: const Icon(Icons.refresh),
             ),
+            IconButton(
+              tooltip: 'Settings',
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (context) => SettingsPage(
+                    state: state,
+                    repositoryPath: repositoryPath,
+                    repositoryName: summary.name,
+                  ),
+                ),
+              ),
+              icon: const Icon(Icons.settings_outlined),
+            ),
           ],
         ),
-        // The changes and the history scroll; the commit box does not
-        // (`committing.the-commit-box-is-pinned`).
+        _Facts(summary: summary),
+        const Divider(height: 1),
+        // History leads: it is what a repository is mostly looked at for.
+        // Each tab owns its own controls — the commit box belongs to Staged
+        // and appears nowhere else.
         Expanded(
-          child: ListView(
-            children: [
-              _Facts(summary: summary),
-              const Divider(height: 1),
-              _StagingLists(state: state, repositoryPath: repositoryPath),
-              const Divider(height: 1),
-              _Heading(label: 'History', count: history?.length),
-              if (history == null)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              else
-                for (final commit in history)
-                  _CommitRow(
-                    commit: commit,
-                    onTap: () => state.selectCommit(repositoryPath, commit.id),
+          child: DefaultTabController(
+            length: 4,
+            child: Column(
+              children: [
+                TabBar(
+                  tabs: [
+                    const Tab(text: 'History'),
+                    Tab(
+                      text: switch (state.staging?.staged.length ?? 0) {
+                        0 => 'Staged',
+                        final n => 'Staged ($n)',
+                      },
+                    ),
+                    Tab(text: 'Branches (${summary.branches.length})'),
+                    Tab(text: 'Remotes (${state.remotes?.length ?? 0})'),
+                  ],
+                ),
+                Expanded(
+                  child: TabBarView(
+                    children: [
+                      if (history == null)
+                        const Center(child: CircularProgressIndicator())
+                      else
+                        ListView(
+                          children: [
+                            for (final commit in history)
+                              _CommitRow(
+                                commit: commit,
+                                onTap: () => state.selectCommit(
+                                  repositoryPath,
+                                  commit.id,
+                                ),
+                              ),
+                          ],
+                        ),
+                      Column(
+                        children: [
+                          Expanded(
+                            child: ListView(
+                              children: [
+                                _StagingLists(
+                                  state: state,
+                                  repositoryPath: repositoryPath,
+                                ),
+                              ],
+                            ),
+                          ),
+                          // Pinned, so a hundred changed files cannot hide the
+                          // one control the tab exists for.
+                          _CommitBox(
+                            state: state,
+                            repositoryPath: repositoryPath,
+                          ),
+                        ],
+                      ),
+                      ListView(
+                        children: [
+                          _Branches(
+                            state: state,
+                            repositoryPath: repositoryPath,
+                            summary: summary,
+                          ),
+                        ],
+                      ),
+                      ListView(
+                        children: [
+                          _Remotes(
+                            state: state,
+                            repositoryPath: repositoryPath,
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
-            ],
+                ),
+              ],
+            ),
           ),
         ),
-        _CommitBox(state: state, repositoryPath: repositoryPath),
       ],
     );
   }
@@ -283,6 +357,814 @@ class _Heading extends StatelessWidget {
       ),
     );
   }
+}
+
+/// The branches, and what can be done to them.
+class _Branches extends StatelessWidget {
+  final ExplorerState state;
+  final String repositoryPath;
+  final RepositorySummary summary;
+
+  const _Branches({
+    required this.state,
+    required this.repositoryPath,
+    required this.summary,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Column(
+      children: [
+        _Heading(label: 'Branches', count: summary.branches.length),
+        if (summary.branches.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              'No branches yet — the first commit makes one.',
+              style: theme.textTheme.bodyMedium
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          )
+        else
+          for (final branch in summary.branches)
+            ListTile(
+              dense: true,
+              leading: Icon(
+                branch == summary.branch
+                    ? Icons.radio_button_checked
+                    : Icons.call_split,
+                color: branch == summary.branch
+                    ? theme.colorScheme.primary
+                    : null,
+              ),
+              title: Text(branch),
+              subtitle:
+                  branch == summary.branch ? const Text('checked out') : null,
+              trailing: PopupMenuButton<String>(
+                tooltip: 'Branch actions',
+                onSelected: (choice) async {
+                  switch (choice) {
+                    case 'rename':
+                      await _renameBranch(
+                        context,
+                        state,
+                        repositoryPath,
+                        branch,
+                      );
+                    case 'delete':
+                      await _deleteBranch(
+                        context,
+                        state,
+                        repositoryPath,
+                        branch,
+                      );
+                  }
+                },
+                itemBuilder: (context) => [
+                  const PopupMenuItem(value: 'rename', child: Text('Rename…')),
+                  PopupMenuItem(
+                    value: 'delete',
+                    // The checked-out branch cannot go; git refuses it too.
+                    enabled: branch != summary.branch,
+                    child: const Text('Delete…'),
+                  ),
+                ],
+              ),
+            ),
+      ],
+    );
+  }
+}
+
+Future<void> _renameBranch(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  String branch,
+) async {
+  final controller = TextEditingController(text: branch);
+
+  final name = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('Rename $branch'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'New name',
+          helperText: 'Slashes group branches, as in feature/thing',
+        ),
+        onSubmitted: (value) => Navigator.pop(context, value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, controller.text),
+          child: const Text('Rename'),
+        ),
+      ],
+    ),
+  );
+
+  final to = name?.trim();
+  if (to == null || to.isEmpty || to == branch) return;
+
+  final ok = await state.renameBranch(repositoryPath, branch, to);
+  if (!context.mounted) return;
+
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        ok ? 'Renamed $branch to $to' : state.error ?? 'Rename refused',
+      ),
+    ),
+  );
+}
+
+Future<void> _deleteBranch(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  String branch,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('Delete $branch?'),
+      content: const Text(
+        'The commits stay in the repository; nothing points at them from '
+        'here afterwards. If they are not on another branch, they become '
+        'hard to find.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return;
+
+  final ok = await state.deleteBranch(repositoryPath, branch);
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        ok ? 'Deleted $branch' : state.error ?? 'Delete refused',
+      ),
+    ),
+  );
+}
+
+/// The remotes, and fetching from them.
+class _Remotes extends StatelessWidget {
+  final ExplorerState state;
+  final String repositoryPath;
+
+  const _Remotes({required this.state, required this.repositoryPath});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final remotes = state.remotes;
+
+    return Column(
+      children: [
+        _Heading(
+          label: 'Remotes',
+          count: remotes?.length,
+          trailing: TextButton.icon(
+            onPressed: () => _addRemote(context, state, repositoryPath),
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('Add'),
+          ),
+        ),
+        if (remotes == null)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (remotes.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              'No remotes. Add one to fetch from it.',
+              style: theme.textTheme.bodyMedium
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          )
+        else
+          for (final remote in remotes)
+            ListTile(
+              dense: true,
+              leading: Icon(
+                remote.isLocal ? Icons.folder_outlined : Icons.cloud_outlined,
+              ),
+              title: Row(
+                children: [
+                  Flexible(child: Text(remote.name)),
+                  const SizedBox(width: 8),
+                  _Divergence(remote: remote),
+                ],
+              ),
+              subtitle: Text(remote.url, overflow: TextOverflow.ellipsis),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (state.fetching == remote.name)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 12),
+                      child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  else
+                    IconButton(
+                      tooltip: remote.canFetch
+                          ? 'Fetch'
+                          // Said here rather than discovered when the button
+                          // does nothing.
+                          : 'This build talks http(s), or to a folder',
+                      onPressed: remote.canFetch && state.fetching == null
+                          ? () => _fetch(context, state, repositoryPath, remote)
+                          : null,
+                      icon: const Icon(Icons.download_outlined),
+                    ),
+                  if (state.pulling == remote.name)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 12),
+                      child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  else
+                    IconButton(
+                      tooltip: remote.canFetch
+                          ? 'Pull — fetch, then merge into this branch'
+                          : 'This build talks http(s), or to a folder',
+                      onPressed: remote.canFetch &&
+                              state.pulling == null &&
+                              state.fetching == null
+                          ? () => _pull(context, state, repositoryPath, remote)
+                          : null,
+                      icon: const Icon(Icons.sync),
+                    ),
+                  if (state.pushing == remote.name)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 12),
+                      child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  else
+                    IconButton(
+                      tooltip: remote.canFetch
+                          ? 'Push the current branch'
+                          : 'This build talks http(s), or to a folder',
+                      onPressed: remote.canFetch && state.pushing == null
+                          ? () => _push(context, state, repositoryPath, remote)
+                          : null,
+                      icon: const Icon(Icons.upload_outlined),
+                    ),
+                  IconButton(
+                    tooltip: 'Remove',
+                    onPressed: () =>
+                        state.removeRemote(repositoryPath, remote.name),
+                    icon: const Icon(Icons.remove_circle_outline),
+                  ),
+                ],
+              ),
+            ),
+        if (state.lastPull case final outcome?)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Card(
+              margin: EdgeInsets.zero,
+              elevation: 0,
+              surfaceTintColor: Colors.transparent,
+              color: outcome.ok
+                  ? successBackground(context)
+                  : theme.colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            switch (outcome) {
+                              _ when outcome.error != null =>
+                                'Pull from ${outcome.remote} failed',
+                              _ when outcome.conflicts.isNotEmpty =>
+                                '${outcome.conflicts.length} '
+                                    '${outcome.conflicts.length == 1 ? 'file needs' : 'files need'} '
+                                    'resolving',
+                              _ when outcome.mergeOutcome == 'alreadyUpToDate' =>
+                                'Nothing new to merge',
+                              _ when outcome.mergeOutcome == 'fastForward' =>
+                                'Moved forward to ${outcome.remote}',
+                              _ => 'Merged ${outcome.remote}',
+                            },
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: outcome.ok
+                                  ? onSuccessBackground(context)
+                                  : null,
+                            ),
+                          ),
+                          for (final path in outcome.conflicts)
+                            Text(path, style: monospaceStyle(context)),
+                          if (outcome.error case final message?)
+                            Text(message, style: theme.textTheme.bodySmall),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: state.dismissLastPull,
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        if (state.lastPush case final outcome?)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Card(
+              margin: EdgeInsets.zero,
+              color: outcome.ok
+                  ? theme.colorScheme.surfaceContainerHighest
+                  : theme.colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            outcome.needsCredentials
+                                ? '${outcome.remote} needs a sign-in'
+                                : outcome.error != null
+                                ? 'Push to ${outcome.remote} failed'
+                                : outcome.rejected.isNotEmpty
+                                    ? 'Push to ${outcome.remote} refused'
+                                    : outcome.updated.isEmpty
+                                        ? '${outcome.remote} already has these '
+                                            'commits'
+                                        : 'Pushed ${outcome.objectsSent} '
+                                            'objects to ${outcome.remote}',
+                            style: theme.textTheme.bodyMedium,
+                          ),
+                          for (final line in outcome.updated)
+                            Text(line, style: monospaceStyle(context)),
+                          for (final line in outcome.rejected)
+                            Text(line, style: monospaceStyle(context)),
+                          if (outcome.error case final message?)
+                            Text(message, style: theme.textTheme.bodySmall),
+                          // Offered only for the case it fixes, and never
+                          // done without being asked.
+                          if (outcome.canForce)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: OutlinedButton(
+                                onPressed: () => _push(
+                                  context,
+                                  state,
+                                  repositoryPath,
+                                  RemoteData(
+                                    name: outcome.remote,
+                                    url: '',
+                                  ),
+                                  force: true,
+                                ),
+                                child: const Text('Force push'),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: state.dismissLastPush,
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        if (state.lastFetch case final outcome?)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Card(
+              margin: EdgeInsets.zero,
+              color: outcome.error != null
+                  ? theme.colorScheme.errorContainer
+                  : theme.colorScheme.surfaceContainerHighest,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            outcome.needsCredentials
+                                ? '${outcome.remote} needs a sign-in'
+                                : outcome.error != null
+                                ? 'Fetch from ${outcome.remote} failed'
+                                : outcome.updated.isEmpty
+                                    // Not "up to date": a fetch that brought
+                                    // nothing says nothing about whether this
+                                    // branch and the remote's agree.
+                                    ? 'No new commits on ${outcome.remote}'
+                                    : 'Fetched ${outcome.objectsReceived} '
+                                        'objects from ${outcome.remote}',
+                            style: theme.textTheme.bodyMedium,
+                          ),
+                          // What moved, by name (`care.reported`).
+                          for (final line in outcome.updated)
+                            Text(line, style: monospaceStyle(context)),
+                          if (outcome.error case final message?)
+                            Text(message, style: theme.textTheme.bodySmall),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: state.dismissLastFetch,
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// What the user typed when asked to sign in.
+typedef SignIn = ({String username, String password, bool remember});
+
+/// Asks for a username and a secret.
+///
+/// Most hosts want a personal access token in the password field rather than
+/// an account password, so the field says so instead of leaving it to be
+/// guessed after a rejection.
+Future<SignIn?> askForCredentials(
+  BuildContext context, {
+  required String remote,
+  String? username,
+  required bool wereRejected,
+  required bool canSave,
+}) async {
+  final name = TextEditingController(text: username ?? '');
+  final secret = TextEditingController();
+  var remember = canSave;
+
+  return showDialog<SignIn>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: Text(wereRejected ? 'Sign in again' : 'Sign in to $remote'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (wereRejected)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 12),
+                child: Text('The saved details were refused.'),
+              ),
+            TextField(
+              controller: name,
+              autofocus: (username ?? '').isEmpty,
+              decoration: const InputDecoration(labelText: 'Username'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: secret,
+              autofocus: (username ?? '').isNotEmpty,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Password or access token',
+              ),
+              onSubmitted: (_) => Navigator.pop(context, (
+                username: name.text.trim(),
+                password: secret.text,
+                remember: remember,
+              )),
+            ),
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: remember,
+              onChanged: canSave
+                  ? (value) => setState(() => remember = value ?? false)
+                  : null,
+              title: const Text('Save it'),
+              subtitle: Text(
+                canSave
+                    // Named plainly: the user should know where their secret
+                    // is going, and that it is not this application's own file.
+                    ? 'Kept by git\'s credential helper, the same store git '
+                        'itself uses'
+                    : 'No credential helper is configured, so this can only '
+                        'be remembered until the window closes',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, (
+              username: name.text.trim(),
+              password: secret.text,
+              remember: remember,
+            )),
+            child: const Text('Sign in'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// Fetches, asking for credentials when the remote wants them.
+Future<void> _fetch(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  RemoteData remote,
+) async {
+  final outcome = await state.fetchRemote(repositoryPath, remote.name);
+  if (outcome == null || !outcome.needsCredentials) return;
+  if (!context.mounted) return;
+
+  final signIn = await askForCredentials(
+    context,
+    remote: remote.name,
+    username: outcome.username,
+    wereRejected: outcome.wereRejected,
+    canSave: outcome.canSave,
+  );
+  if (signIn == null) return;
+
+  await state.fetchRemote(
+    repositoryPath,
+    remote.name,
+    username: signIn.username,
+    password: signIn.password,
+    remember: signIn.remember,
+  );
+}
+
+/// Fetches and merges, asking for credentials when the remote wants them.
+Future<void> _pull(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  RemoteData remote,
+) async {
+  final outcome = await state.pullRemote(repositoryPath, remote.name);
+  if (outcome == null || !outcome.fetch.needsCredentials) return;
+  if (!context.mounted) return;
+
+  final signIn = await askForCredentials(
+    context,
+    remote: remote.name,
+    username: outcome.fetch.username,
+    wereRejected: outcome.fetch.wereRejected,
+    canSave: outcome.fetch.canSave,
+  );
+  if (signIn == null) return;
+
+  await state.pullRemote(
+    repositoryPath,
+    remote.name,
+    username: signIn.username,
+    password: signIn.password,
+    remember: signIn.remember,
+  );
+}
+
+/// Pushes, asking first when it would overwrite.
+Future<void> _push(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  RemoteData remote, {
+  bool force = false,
+}) async {
+  if (force) {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Force push?'),
+        content: Text(
+          '${remote.name} holds commits this branch does not. Forcing will '
+          'overwrite them there, and whoever made them may have no other '
+          'copy.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Force push'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+  }
+
+  final outcome =
+      await state.pushRemote(repositoryPath, remote.name, force: force);
+  if (outcome == null || !outcome.needsCredentials) return;
+  if (!context.mounted) return;
+
+  final signIn = await askForCredentials(
+    context,
+    remote: remote.name,
+    username: outcome.username,
+    wereRejected: outcome.wereRejected,
+    canSave: outcome.canSave,
+  );
+  if (signIn == null) return;
+
+  await state.pushRemote(
+    repositoryPath,
+    remote.name,
+    force: force,
+    username: signIn.username,
+    password: signIn.password,
+    remember: signIn.remember,
+  );
+}
+
+/// How far the current branch stands from this remote's copy of it.
+///
+/// Always as of the last fetch, which the tooltip says outright: the numbers
+/// describe what this repository knows, not what the server holds now, and a
+/// counter that quietly implied otherwise would be worse than none.
+class _Divergence extends StatelessWidget {
+  final RemoteData remote;
+
+  const _Divergence({required this.remote});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    if (remote.trackingRef == null) {
+      // Two different situations, and the advice differs: fetch to find out,
+      // or the remote genuinely has no copy of this branch.
+      final message = remote.neverFetched
+          ? 'Nothing has been fetched from this remote yet, so there is '
+              'nothing here to compare against'
+          : 'This remote has no copy of the current branch yet';
+      return Tooltip(
+        message: message,
+        child: Text(
+          remote.neverFetched ? 'fetch to compare' : 'no copy yet',
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
+      );
+    }
+
+    if (remote.tooLargeToCount) {
+      return Tooltip(
+        message: 'This history is too large to count quickly',
+        child: Text('—', style: theme.textTheme.bodySmall),
+      );
+    }
+
+    if (!remote.hasCounts) return const SizedBox.shrink();
+
+    if (remote.isEven) {
+      return Tooltip(
+        message: 'Level with ${remote.trackingRef}, as of the last fetch',
+        child: Text(
+          'up to date',
+          style: theme.textTheme.bodySmall
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
+      );
+    }
+
+    return Tooltip(
+      message: 'Against ${remote.trackingRef}, as of the last fetch:\n'
+          '${remote.ahead} to push, ${remote.behind} to pull',
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (remote.ahead! > 0) ...[
+            Icon(Icons.arrow_upward, size: 14, color: successMark(context)),
+            Text(
+              '${remote.ahead}',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: successMark(context)),
+            ),
+          ],
+          if (remote.behind! > 0) ...[
+            const SizedBox(width: 6),
+            Icon(
+              Icons.arrow_downward,
+              size: 14,
+              color: statusColor(FileState.modified, context),
+            ),
+            Text(
+              '${remote.behind}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: statusColor(FileState.modified, context),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> _addRemote(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+) async {
+  final name = TextEditingController(text: 'origin');
+  final url = TextEditingController();
+
+  final added = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Add a remote'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: name,
+            decoration: const InputDecoration(labelText: 'Name'),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: url,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'URL or folder',
+              hintText: 'https://example.com/project.git',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Add'),
+        ),
+      ],
+    ),
+  );
+
+  if (added != true) return;
+  if (name.text.trim().isEmpty || url.text.trim().isEmpty) return;
+  await state.addRemote(repositoryPath, name.text.trim(), url.text.trim());
 }
 
 /// The staging area's two lists.
@@ -485,27 +1367,65 @@ class _CommitBoxState extends State<_CommitBox> {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (state.lastCommit case final committed?) ...[
-              Row(
-                children: [
-                  Icon(
-                    Icons.check_circle_outline,
-                    color: statusColor(FileState.added, context),
+              // On its own card, the same as the fetch and push reports: a
+              // bare row of text reads as part of the form above it, and what
+              // was just written deserves to be seen.
+              Card(
+                margin: EdgeInsets.zero,
+                // Elevation and the surface tint that comes with it are what
+                // turned this green grey; the fill is stated outright instead.
+                elevation: 0,
+                surfaceTintColor: Colors.transparent,
+                color: successBackground(context),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+                  child: Row(
+                    children: [
+                      // A white tick in a solid green disc. Drawn in the same
+                      // dark green as the text it sits beside, it stopped
+                      // reading as a mark and became part of the sentence.
+                      CircleAvatar(
+                        radius: 14,
+                        backgroundColor: successMark(context),
+                        child: const Icon(
+                          Icons.check,
+                          size: 18,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Committed ${committed.shortId}',
+                              style: theme.textTheme.bodySmall
+                                  ?.copyWith(color: onSuccessBackground(context)),
+                            ),
+                            Text(
+                              committed.summary,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: onSuccessBackground(context),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Dismiss',
+                        color: onSuccessBackground(context),
+                        onPressed: state.dismissLastCommit,
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Committed ${committed.shortId} — ${committed.summary}',
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodyMedium,
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: state.dismissLastCommit,
-                    icon: const Icon(Icons.close),
-                  ),
-                ],
+                ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 12),
             ],
             TextField(
               controller: _message,
