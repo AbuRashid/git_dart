@@ -152,6 +152,27 @@ void _children(GitObject object, List<ObjectId> out) {
   }
 }
 
+/// The name each of [objects] is known by, taken from the trees among them.
+///
+/// Only used to order the pack: the packer groups revisions of one file
+/// together so it has plausible delta bases to try, and a name it does not
+/// have simply falls back to ordering by size.
+Map<ObjectId, String> _namesWithin(
+  Repository repository,
+  Iterable<ObjectId> objects,
+) {
+  final names = <ObjectId, String>{};
+  for (final id in objects) {
+    final raw = repository.objects.readRaw(id);
+    if (raw == null || raw.kind != ObjectKind.tree) continue;
+    for (final entry in Tree.parse(raw.content).entries) {
+      if (entry.mode.isSubmodule) continue;
+      names.putIfAbsent(entry.id, () => entry.name);
+    }
+  }
+  return names;
+}
+
 /// True when [ours] contains [theirs] — the condition for a fast-forward.
 bool _contains(Repository repository, ObjectId ours, ObjectId theirs) {
   final seen = <ObjectId>{};
@@ -355,10 +376,13 @@ Future<PushResult> _pushHttp(
     );
 
     final writer = PackWriter();
+    final names = _namesWithin(repository, send);
     for (final id in send) {
       final raw = repository.objects.readRaw(id);
       if (raw == null) continue;
-      writer.add(id, raw.kind, raw.content);
+      // Named where the name is known, so revisions of one file sit together
+      // and the packer has plausible delta bases to try.
+      writer.add(id, raw.kind, raw.content, name: names[id]);
     }
     onProgress?.call('sending ${writer.length} objects');
 

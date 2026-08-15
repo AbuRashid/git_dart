@@ -211,8 +211,21 @@ Future<FetchResult> _fetchLocal(
     } else {
       onProgress?.call('packing ${arrived.length} objects');
       final writer = PackWriter();
+      final names = <ObjectId, String>{};
       for (final object in arrived) {
-        writer.add(object.id, object.kind, object.content);
+        if (object.kind != ObjectKind.tree) continue;
+        for (final entry in Tree.parse(object.content).entries) {
+          if (entry.mode.isSubmodule) continue;
+          names.putIfAbsent(entry.id, () => entry.name);
+        }
+      }
+      for (final object in arrived) {
+        writer.add(
+          object.id,
+          object.kind,
+          object.content,
+          name: names[object.id],
+        );
       }
       final built = writer.buildWithIndex();
       repository.objects.writePack(

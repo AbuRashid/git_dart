@@ -47,7 +47,19 @@ class RepackResult {
 /// exactly what the reflog exists to keep findable (`refs.reflog`); collecting
 /// it because no ref points at it would make every reset and every rebase
 /// irreversible the moment a repack ran.
-Set<ObjectId> liveObjects(Repository repository) {
+Set<ObjectId> liveObjects(Repository repository) =>
+    liveObjectsAndNames(repository).objects;
+
+/// Everything that must be kept, and the name each object was last seen
+/// under.
+///
+/// The names come out of the same walk rather than a second one: it already
+/// reads every tree and sees every entry's name, so the information is passing
+/// through anyway — and it is what lets the packer put revisions of one file
+/// next to each other, which is where most delta compression comes from.
+({Set<ObjectId> objects, Map<ObjectId, String> names}) liveObjectsAndNames(
+  Repository repository,
+) {
   final roots = <ObjectId>[];
 
   for (final ref in repository.refs.list()) {
@@ -97,13 +109,17 @@ Set<ObjectId> liveObjects(Repository repository) {
     }
   }
 
-  final live = _reachable(repository, roots);
-  live.addAll(extra);
-  return live;
+  final walked = _reachable(repository, roots);
+  walked.objects.addAll(extra);
+  return walked;
 }
 
-Set<ObjectId> _reachable(Repository repository, Iterable<ObjectId> roots) {
+({Set<ObjectId> objects, Map<ObjectId, String> names}) _reachable(
+  Repository repository,
+  Iterable<ObjectId> roots,
+) {
   final seen = <ObjectId>{};
+  final names = <ObjectId, String>{};
   final pending = <ObjectId>[...roots];
 
   while (pending.isNotEmpty) {
@@ -124,7 +140,9 @@ Set<ObjectId> _reachable(Repository repository, Iterable<ObjectId> roots) {
           ..addAll(commit.parents);
       case Tree tree:
         for (final entry in tree.entries) {
-          if (!entry.mode.isSubmodule) pending.add(entry.id);
+          if (entry.mode.isSubmodule) continue;
+          pending.add(entry.id);
+          names.putIfAbsent(entry.id, () => entry.name);
         }
       case Tag tag:
         pending.add(tag.target);
@@ -132,7 +150,7 @@ Set<ObjectId> _reachable(Repository repository, Iterable<ObjectId> roots) {
         break;
     }
   }
-  return seen;
+  return (objects: seen, names: names);
 }
 
 /// Packs everything into one packfile and removes what the pack replaces.
@@ -152,7 +170,8 @@ RepackResult repack(
   bool prune = false,
   void Function(String message)? onProgress,
 }) {
-  final live = liveObjects(repository);
+  final walked = liveObjectsAndNames(repository);
+  final live = walked.objects;
 
   // Everything the store holds, once: an object may be both loose and packed
   // after an earlier repack, which is legal and means the same object.
@@ -165,7 +184,10 @@ RepackResult repack(
   for (final id in keep) {
     final raw = repository.objects.readRaw(id);
     if (raw == null) continue;
-    writer.add(id, raw.kind, raw.content);
+    // The name is what groups revisions of one file together, which is where
+    // most of the delta compression comes from. An object nothing names — an
+    // unreachable blob being carried along — simply sorts by size.
+    writer.add(id, raw.kind, raw.content, name: walked.names[id]);
   }
 
   if (writer.length == 0) {
@@ -216,9 +238,15 @@ RepackResult repack(
       if (entry is! File || !entry.path.endsWith('.pack')) continue;
       if (packPath != null && p.equals(entry.path, packPath)) continue;
 
+      final base = p.withoutExtension(entry.path);
+
+      // A `.keep` is a request not to remove this pack — left by a fetch in
+      // progress, or by someone who meant it. It is not ours to overrule.
+      if (File('$base.keep').existsSync()) continue;
+
       // A pack is dropped only when every object in it is in the new one.
       // Anything less and this would be deleting the only copy of something.
-      final index = '${p.withoutExtension(entry.path)}.idx';
+      final index = '$base.idx';
       if (!File(index).existsSync()) continue;
 
       final held = repository.objects.packs
@@ -234,9 +262,25 @@ RepackResult repack(
         pack.close();
         repository.objects.packs.remove(pack);
       }
-      _deleteAll([entry, File(index)]);
+
+      // A pack is more than two files. Git writes a reverse index beside it,
+      // and may write a bitmap or a promisor marker; each names the pack it
+      // belongs to and is meaningless without it. Leaving one behind is not
+      // untidiness — git reads them, and a companion whose pack has gone is
+      // a repository that no longer passes `fsck`.
+      _deleteAll([
+        entry,
+        File(index),
+        for (final companion in const ['.rev', '.bitmap', '.promisor',
+          '.mtimes'])
+          if (File('$base$companion').existsSync()) File('$base$companion'),
+      ]);
       packsRemoved += 1;
     }
+  }
+
+  if (packsRemoved > 0 || packPath != null) {
+    _dropStalePackIndexes(packDirectory);
   }
 
   // Empty fan-out directories left behind by the loose objects that went.
@@ -317,6 +361,37 @@ List<File> _deleteAll(List<File> files) {
     }
   }
   return gone;
+}
+
+/// Removes the indexes that describe *which* packs a repository has, once that
+/// set has changed.
+///
+/// A multi-pack-index names the packs it covers by position and is read before
+/// the packs themselves; one that names a pack which is no longer there makes
+/// `fsck` fail on a repository whose objects are all present and correct. It
+/// is a cache, so deleting it is always safe and git rebuilds it on request.
+/// The same goes for `info/packs`, which is the list a dumb-HTTP client reads
+/// and which would otherwise send that client after a file that has gone.
+void _dropStalePackIndexes(Directory packDirectory) {
+  if (!packDirectory.existsSync()) return;
+
+  final stale = <File>[];
+  for (final entry in packDirectory.listSync()) {
+    if (entry is! File) continue;
+    final name = p.basename(entry.path);
+    if (name == 'multi-pack-index' || name.startsWith('multi-pack-index-')) {
+      stale.add(entry);
+    }
+  }
+
+  final info = File(p.join(
+    p.dirname(packDirectory.path),
+    'info',
+    'packs',
+  ));
+  if (info.existsSync()) stale.add(info);
+
+  _deleteAll(stale);
 }
 
 void _pruneEmptyFanout(String objectsDirectory) {

@@ -228,6 +228,70 @@ void main() {
     expect(git(['rev-parse', 'keepme^{commit}']).trim(), tagged.hex);
   });
 
+  test('removing a pack removes what described it', () {
+    // A pack is more than two files: git writes a reverse index beside it and
+    // may write a multi-pack-index naming it by position. Removing the pack
+    // and leaving those behind gives a repository whose objects are all
+    // present and which `fsck` refuses, because the index it reads first
+    // points at a pack that has gone.
+    git(['repack', '-adq']);
+    git(['multi-pack-index', 'write']);
+    expect(
+      File(p.join(repoPath, '.git', 'objects', 'pack', 'multi-pack-index'))
+          .existsSync(),
+      isTrue,
+      reason: 'the test needs git to have written one',
+    );
+
+    // Something new, so our repack supersedes git's pack rather than matching
+    // it.
+    write('after.txt', 'written after packing\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'after']);
+
+    final repo = Repository.open(repoPath);
+    final result = repack(repo);
+    repo.close();
+
+    expect(result.packsRemoved, greaterThan(0));
+
+    final leftover = Directory(p.join(repoPath, '.git', 'objects', 'pack'))
+        .listSync()
+        .map((e) => p.basename(e.path))
+        .toList();
+    expect(leftover.where((n) => n.startsWith('multi-pack-index')), isEmpty);
+    expect(leftover.where((n) => n.endsWith('.rev')), isEmpty);
+
+    git(['fsck', '--no-progress', '--strict']);
+    expect(git(['rev-list', '--count', 'HEAD']).trim(), '9');
+  });
+
+  test('a pack marked .keep is left alone', () {
+    git(['repack', '-adq']);
+    final packs = Directory(p.join(repoPath, '.git', 'objects', 'pack'))
+        .listSync()
+        .map((e) => e.path)
+        .where((path) => path.endsWith('.pack'))
+        .toList();
+    expect(packs, hasLength(1));
+    final keep = '${p.withoutExtension(packs.single)}.keep';
+    File(keep).writeAsStringSync('held for a reason\n');
+
+    write('after.txt', 'more\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'after']);
+
+    final repo = Repository.open(repoPath);
+    final result = repack(repo);
+    repo.close();
+
+    // A `.keep` is a request not to remove the pack, and it is not ours to
+    // overrule.
+    expect(result.packsRemoved, 0);
+    expect(File(packs.single).existsSync(), isTrue);
+    git(['fsck', '--no-progress', '--strict']);
+  });
+
   test('the pack we leave behind is one git verifies', () {
     final repo = Repository.open(repoPath);
     repack(repo);

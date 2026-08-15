@@ -29,6 +29,7 @@ export 'src/refs/ref_store.dart';
 export 'src/refs/reflog.dart';
 export 'src/remote/remote.dart';
 export 'src/repository.dart';
+export 'src/storage/delta.dart';
 export 'src/storage/loose_object_store.dart';
 export 'src/storage/object_store.dart';
 export 'src/storage/pack_file.dart';
