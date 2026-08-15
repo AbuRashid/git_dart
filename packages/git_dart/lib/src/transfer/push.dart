@@ -243,7 +243,11 @@ Future<PushResult> _pushLocal(
       }
 
       accepted.forEach((ref, id) {
-        target.refs.write(ref, id);
+        target.refs.write(
+          ref,
+          id,
+          reflogMessage: 'push${force && theirs[ref] != null ? ' (forced)' : ''}',
+        );
         statuses.add(PushStatus(
           ref: ref,
           to: id,
@@ -448,7 +452,7 @@ void _updateTrackingRefs(
   pushed.forEach((ref, id) {
     final tracking = remote.trackingRefFor(ref);
     if (tracking == null || tracking.isEmpty) return;
-    repository.refs.write(tracking, id);
+    repository.refs.write(tracking, id, reflogMessage: 'update by push');
   });
 }
 

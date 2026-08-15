@@ -213,9 +213,13 @@ class ExplorerState extends ChangeNotifier {
 
     try {
       _history = await _git.history(repository, limit: 200);
+      // The remotes carry ahead/behind counts, and anything that moves this
+      // branch — a commit, a pull, a push — changes them. Without this the
+      // tile keeps showing what it said when the repository was opened.
+      if (_remotes != null) _remotes = await _git.remotes(repository);
     } on GitWorkerException {
-      // The history is a nicety here; a failure to refresh it must not undo
-      // the commit that just succeeded.
+      // These are niceties: a failure to refresh them must not undo the
+      // operation that just succeeded.
     }
     notifyListeners();
   }

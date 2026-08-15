@@ -557,6 +557,10 @@ class _Worker {
           }
 
           final key = '${localTip.hex}:${remoteTip.hex}';
+          // The pair of tips is the whole key, so entries for tips that have
+          // moved on are dead weight rather than wrong. Cleared wholesale
+          // when there are enough of them to notice.
+          if (_divergence.length > 64) _divergence.clear();
           final counts = _divergence.containsKey(key)
               ? _divergence[key]
               : _divergence[key] = () {

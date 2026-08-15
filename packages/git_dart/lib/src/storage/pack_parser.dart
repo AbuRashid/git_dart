@@ -1,10 +1,11 @@
 import 'dart:typed_data';
 
-import 'package:archive/archive.dart' show Inflate, InputStream;
+import 'package:archive/archive.dart' show Inflate, InputStream, getCrc32;
 import 'package:crypto/crypto.dart';
 
 import '../object_id.dart';
 import '../objects/git_object.dart';
+import 'pack_index_writer.dart';
 
 /// Reads a whole packfile held in memory, resolving every delta.
 ///
@@ -21,6 +22,36 @@ class PackParser {
   final Uint8List bytes;
 
   PackParser(this.bytes);
+
+  /// Where each object's entry starts and ends, and what it turned out to be
+  /// named. Filled during [parse]; a delta's name is only known once its base
+  /// has been found, which is why this is collected rather than returned as
+  /// the pass goes.
+  final _spans = <int, ({int end, ObjectId? id})>{};
+
+  /// The pack's own trailing hash, once [parse] has checked it.
+  ObjectId? checksum;
+
+  /// Every object with its offset and entry checksum, ready to be written as
+  /// an index.
+  ///
+  /// Only meaningful after [parse]. Indexing a pack this way — rather than
+  /// re-deriving the offsets afterwards — is the difference between storing a
+  /// received pack as it arrived and inflating the whole thing twice.
+  List<PackedObject> indexEntries() {
+    final out = <PackedObject>[];
+    _spans.forEach((offset, span) {
+      final id = span.id;
+      if (id == null) return;
+      out.add(PackedObject(
+        id: id,
+        offset: offset,
+        crc32: getCrc32(Uint8List.sublistView(bytes, offset, span.end)),
+      ));
+    });
+    out.sort((a, b) => a.offset.compareTo(b.offset));
+    return out;
+  }
 
   /// Every object in the pack, keyed by name, with deltas applied.
   Map<ObjectId, ({ObjectKind kind, Uint8List content})> parse() {
@@ -45,6 +76,7 @@ class PackParser {
     if (declared != actual) {
       throw const FormatException('the packfile\'s own checksum does not match');
     }
+    checksum = actual;
 
     final byOffset = <int, ({ObjectKind kind, Uint8List content})>{};
     final byName = <ObjectId, ({ObjectKind kind, Uint8List content})>{};
@@ -60,6 +92,9 @@ class PackParser {
 
       final inflated = _inflateAt(at, header.size);
       at = inflated.next;
+      // Where this entry ended, so its checksum can be taken over exactly the
+      // bytes a reader will later find here.
+      _spans[start] = (end: at, id: null);
 
       switch (header.type) {
         case 6: // ofs-delta
@@ -139,7 +174,11 @@ class PackParser {
     ({ObjectKind kind, Uint8List content}) object,
   ) {
     byOffset[offset] = object;
-    byName[hashObject(object.kind, object.content)] = object;
+    final id = hashObject(object.kind, object.content);
+    byName[id] = object;
+
+    final span = _spans[offset];
+    if (span != null) _spans[offset] = (end: span.end, id: id);
   }
 
   ({int type, int size, int next, int? distance, ObjectId? baseName})

@@ -33,19 +33,37 @@ String git(List<String> arguments, {String? cwd}) {
 
 /// A smart-HTTP host, the way a real one works: it runs `git upload-pack` and
 /// pipes the bytes through.
-Future<HttpServer> serve(String repositoryPath) async {
+///
+/// The `Git-Protocol` header is passed on as `GIT_PROTOCOL`, which is exactly
+/// what a real host does and is the only reason a version 2 conversation can
+/// happen over HTTP at all — the header is a request the host has to relay.
+/// Pass [allowVersion2] false to act as a host that does not.
+Future<HttpServer> serve(
+  String repositoryPath, {
+  bool allowVersion2 = true,
+}) async {
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+
+  Map<String, String> environmentFor(HttpRequest request) {
+    final asked = request.headers.value('Git-Protocol');
+    if (!allowVersion2 || asked == null) return const {};
+    return {'GIT_PROTOCOL': asked};
+  }
 
   server.listen((request) async {
     try {
       if (request.method == 'GET' &&
           request.uri.path.endsWith('/info/refs')) {
-        final process = await Process.start('git', [
-          'upload-pack',
-          '--stateless-rpc',
-          '--advertise-refs',
-          repositoryPath,
-        ]);
+        final process = await Process.start(
+          'git',
+          [
+            'upload-pack',
+            '--stateless-rpc',
+            '--advertise-refs',
+            repositoryPath,
+          ],
+          environment: environmentFor(request),
+        );
         // Drained, or a full stderr pipe blocks upload-pack for ever.
         unawaited(process.stderr.drain<void>());
         final body = await process.stdout.fold<List<int>>(
@@ -78,11 +96,11 @@ Future<HttpServer> serve(String repositoryPath) async {
           (all, chunk) => all..addAll(chunk),
         );
 
-        final process = await Process.start('git', [
-          'upload-pack',
-          '--stateless-rpc',
-          repositoryPath,
-        ]);
+        final process = await Process.start(
+          'git',
+          ['upload-pack', '--stateless-rpc', repositoryPath],
+          environment: environmentFor(request),
+        );
         unawaited(process.stderr.drain<void>());
         process.stdin.add(input);
         await process.stdin.close();
@@ -174,6 +192,61 @@ void main() {
       repo.close();
     });
 
+    test('a fetch above the unpack limit is stored as a pack', () async {
+      // Enough objects to cross the line where one file each stops being the
+      // sensible shape. A clone of anything real is far past it.
+      for (var i = 0; i < unpackLimit + 20; i++) {
+        File(p.join(originPath, 'f$i.txt')).writeAsStringSync('content $i\n');
+      }
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'many']);
+
+      final path = emptyClone('packed');
+      final repo = Repository.open(path);
+      repo.remotes.add('origin', originPath);
+
+      final result = await fetch(repo, repo.remotes.named('origin')!);
+      expect(result.objectsReceived, greaterThan(unpackLimit));
+
+      // One pack with its index, and nothing inflated into a loose file.
+      final packDirectory =
+          Directory(p.join(path, '.git', 'objects', 'pack'));
+      final packs = packDirectory
+          .listSync()
+          .map((e) => p.basename(e.path))
+          .toList();
+      expect(packs.where((n) => n.endsWith('.pack')).length, 1);
+      expect(packs.where((n) => n.endsWith('.idx')).length, 1);
+      expect(repo.objects.loose.listAll(), isEmpty);
+
+      // Everything is readable, and git agrees the repository is sound.
+      final tip = repo.refs.resolve('refs/remotes/origin/main')!;
+      expect(repo.objects.contains(tip), isTrue);
+      expect(repo.log(start: tip).length, 3);
+      repo.close();
+
+      git(['fsck', '--no-progress'], cwd: path);
+      git(['verify-pack', p.join('objects', 'pack',
+          packs.firstWhere((n) => n.endsWith('.idx')))], cwd: p.join(path, '.git'));
+      expect(
+        git(['rev-list', '--count', 'refs/remotes/origin/main'], cwd: path)
+            .trim(),
+        '3',
+      );
+    });
+
+    test('a small fetch is still stored loose', () async {
+      final path = emptyClone('small');
+      final repo = Repository.open(path);
+      repo.remotes.add('origin', originPath);
+
+      await fetch(repo, repo.remotes.named('origin')!);
+      // A pack of a dozen objects is mostly header, and reading it needs an
+      // index that a dozen files do not.
+      expect(repo.objects.loose.listAll(), isNotEmpty);
+      repo.close();
+    });
+
     test('a second fetch with nothing new copies nothing', () async {
       final path = emptyClone('twice');
       final repo = Repository.open(path);
@@ -257,6 +330,170 @@ void main() {
         'one\ntwo\n',
       );
       repo.close();
+    });
+
+    test('speaks version 2 when the server offers it', () async {
+      final path = emptyClone('v2');
+      final repo = Repository.open(path);
+      repo.remotes.add('origin', url);
+
+      final result = await fetch(repo, repo.remotes.named('origin')!);
+
+      // Version 2 is settled by what came back, not by what was asked for.
+      expect(result.protocolVersion, 2);
+      expect(result.objectsReceived, greaterThan(0));
+      expect(
+        repo.refs.resolve('refs/remotes/origin/main')!.hex,
+        git(['rev-parse', 'main']).trim(),
+      );
+      // `ls-refs` reports which branch HEAD names, which version 0 cannot be
+      // asked and a clone needs.
+      expect(result.defaultBranch, 'refs/heads/main');
+      repo.close();
+
+      git(['fsck', '--no-progress'], cwd: path);
+      expect(
+        git(['rev-list', '--count', 'refs/remotes/origin/main'], cwd: path)
+            .trim(),
+        '2',
+      );
+    });
+
+    test('falls back to version 0 when the server does not offer 2', () async {
+      await server.close(force: true);
+      server = await serve(originPath, allowVersion2: false);
+      url = 'http://${server.address.address}:${server.port}/origin';
+
+      final path = emptyClone('v0-fallback');
+      final repo = Repository.open(path);
+      repo.remotes.add('origin', url);
+
+      final result = await fetch(repo, repo.remotes.named('origin')!);
+
+      expect(result.protocolVersion, 0);
+      expect(result.objectsReceived, greaterThan(0));
+      expect(
+        repo.refs.resolve('refs/remotes/origin/main')!.hex,
+        git(['rev-parse', 'main']).trim(),
+      );
+      // Version 0 does say which branch HEAD names, through a capability.
+      expect(result.defaultBranch, 'refs/heads/main');
+      repo.close();
+      git(['fsck', '--no-progress'], cwd: path);
+    });
+
+    test('asking for version 2 can be turned off', () async {
+      final path = emptyClone('forced-v0');
+      final repo = Repository.open(path);
+      repo.remotes.add('origin', url);
+
+      final result = await fetch(
+        repo,
+        repo.remotes.named('origin')!,
+        allowVersion2: false,
+      );
+      expect(result.protocolVersion, 0);
+      expect(result.objectsReceived, greaterThan(0));
+      repo.close();
+      git(['fsck', '--no-progress'], cwd: path);
+    });
+
+    test('a second fetch negotiates rather than re-sending history', () async {
+      // The case negotiation exists for: a repository that already has most
+      // of the history and needs the tip.
+      final path = emptyClone('negotiated');
+      var repo = Repository.open(path);
+      repo.remotes.add('origin', url);
+      final first = await fetch(repo, repo.remotes.named('origin')!);
+      repo.close();
+
+      // Enough new commits on the origin that "send everything" and "send the
+      // difference" are clearly different sizes. The server needs no restart:
+      // it runs `git upload-pack` per request, so it sees the repository as it
+      // is now.
+      for (var i = 0; i < 30; i++) {
+        File(p.join(originPath, 'later$i.txt')).writeAsStringSync('$i\n');
+        git(['add', '-A']);
+        git(['commit', '-q', '-m', 'later $i']);
+      }
+      git(['gc', '-q']);
+
+      // The remote is left alone rather than removed and re-added. Removing it
+      // deletes `refs/remotes/origin/*` — correctly, as `git remote remove`
+      // does — and those refs are the whole of what this repository has to
+      // offer, so a fetch after one would have nothing to negotiate with.
+      repo = Repository.open(path);
+      final second = await fetch(repo, repo.remotes.named('origin')!);
+      repo.close();
+
+      // A fresh clone of the same origin, as the control: it has nothing to
+      // offer and must receive the whole history.
+      final freshPath = emptyClone('control');
+      final fresh = Repository.open(freshPath);
+      fresh.remotes.add('origin', url);
+      final full = await fetch(fresh, fresh.remotes.named('origin')!);
+      fresh.close();
+
+      expect(first.objectsReceived, greaterThan(0));
+      expect(second.objectsReceived, greaterThan(0));
+      // The point: telling the server what we have makes it send less than it
+      // sends to someone who has nothing.
+      expect(second.objectsReceived, lessThan(full.objectsReceived));
+      expect(second.negotiationRounds, greaterThan(0));
+
+      expect(
+        git(['rev-list', '--count', 'refs/remotes/origin/main'], cwd: path)
+            .trim(),
+        '32',
+      );
+      git(['fsck', '--no-progress'], cwd: path);
+    });
+
+    test('a large fetch is streamed to disk and indexed there', () async {
+      // git's own upload-pack, so the pack on the wire is delta-compressed
+      // and side-banded — the shape a real clone arrives in, and the one the
+      // streaming reader and the file-backed indexer exist for.
+      for (var i = 0; i < unpackLimit + 20; i++) {
+        File(p.join(originPath, 'f$i.txt')).writeAsStringSync('content $i\n');
+      }
+      git(['add', '-A']);
+      git(['commit', '-q', '-m', 'many']);
+      git(['gc', '-q']);
+
+      // The server was started against the old state; restart it so it
+      // advertises the new commit.
+      await server.close(force: true);
+      server = await serve(originPath);
+      url = 'http://${server.address.address}:${server.port}/origin';
+
+      final path = emptyClone('http-packed');
+      final repo = Repository.open(path);
+      repo.remotes.add('origin', url);
+
+      final result = await fetch(repo, repo.remotes.named('origin')!);
+      expect(result.objectsReceived, greaterThan(unpackLimit));
+
+      final packDirectory = Directory(p.join(path, '.git', 'objects', 'pack'));
+      final names =
+          packDirectory.listSync().map((e) => p.basename(e.path)).toList();
+      expect(names.where((n) => n.endsWith('.pack')).length, 1);
+      expect(names.where((n) => n.endsWith('.idx')).length, 1);
+      // The temporary the response was streamed into is gone.
+      expect(names.where((n) => n.startsWith('incoming-')), isEmpty);
+      expect(repo.objects.loose.listAll(), isEmpty);
+
+      // Everything resolves through the index we built for a pack we never
+      // held whole.
+      final tip = repo.refs.resolve('refs/remotes/origin/main')!;
+      expect(repo.log(start: tip).length, 3);
+      repo.close();
+
+      git(['fsck', '--no-progress'], cwd: path);
+      expect(
+        git(['cat-file', 'blob', 'refs/remotes/origin/main:f7.txt'],
+            cwd: path),
+        'content 7\n',
+      );
     });
 
     // A `git clone` against this server was tried here as a control and does

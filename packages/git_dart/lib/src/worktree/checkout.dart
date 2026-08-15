@@ -8,6 +8,7 @@ import '../object_id.dart';
 import '../objects/git_object.dart';
 import '../objects/tree.dart';
 import '../repository.dart';
+import 'attributes.dart';
 import 'status.dart';
 
 /// Thrown when a checkout would destroy work that is not committed.
@@ -72,21 +73,30 @@ CheckoutResult checkoutTree(
   _flattenTree(repo, target, '', wanted);
 
   final toRemove = current.keys.where((path) => !wanted.containsKey(path));
+
+  // What the working tree actually holds, which is not always what the index
+  // says it holds: a file edited and not staged matches the index exactly.
+  // Deciding what to write from the index alone therefore leaves such a file
+  // untouched — correct for a branch switch, and wrong for a forced checkout,
+  // where overwriting local changes is the whole request. Found by a hard
+  // reset that did not put a modified file back.
+  final dirty = {
+    for (final entry in statusOf(repo, includeUntracked: false).entries)
+      entry.path,
+  };
+
   final toWrite = [
     for (final entry in wanted.entries)
       if (current[entry.key]?.id != entry.value.id ||
-          current[entry.key]?.mode != entry.value.mode.numeric)
+          current[entry.key]?.mode != entry.value.mode.numeric ||
+          (force && dirty.contains(entry.key)))
         entry.key,
   ];
 
   if (!force) {
     final affected = {...toRemove, ...toWrite};
-    final dirty = statusOf(repo, includeUntracked: false)
-        .entries
-        .where((entry) => affected.contains(entry.path))
-        .map((entry) => entry.path)
-        .toList();
-    if (dirty.isNotEmpty) throw CheckoutConflictException(dirty);
+    final blocked = dirty.where(affected.contains).toList();
+    if (blocked.isNotEmpty) throw CheckoutConflictException(blocked);
   }
 
   final degraded = <String>[];
@@ -139,7 +149,12 @@ bool _writeEntry(
   ObjectId id,
 ) {
   final absolute = _absolute(workTree, path);
-  final content = repo.objects.readTyped<Blob>(id).content;
+  final stored = repo.objects.readTyped<Blob>(id).content;
+  // The working tree gets the converted form; the object holds LF endings
+  // whatever this system uses.
+  final content = mode == FileMode.symlink
+      ? stored
+      : toWorkingTree(stored, repo.attributes.conversionFor(path, stored));
   Directory(p.dirname(absolute)).createSync(recursive: true);
 
   final existingLink = Link(absolute);

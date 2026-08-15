@@ -1,9 +1,13 @@
+import 'dart:io';
 import 'dart:typed_data';
+
+import 'package:path/path.dart' as p;
 
 import '../object_id.dart';
 import '../objects/git_object.dart';
 import 'loose_object_store.dart';
 import 'pack_file.dart';
+import 'pack_index_writer.dart';
 
 /// Thrown when an object is asked for by a name the store does not hold.
 class MissingObjectException implements Exception {
@@ -94,6 +98,96 @@ class ObjectStore {
   }
 
   ObjectId write(GitObject object) => loose.write(object);
+
+  /// Stores a packfile whole, alongside an index built for it, and makes it
+  /// readable straight away.
+  ///
+  /// The alternative — inflating every object and writing it loose — is what
+  /// this replaces. It is correct and it is why a first clone of anything real
+  /// produces several hundred thousand files, most of a gigabyte of directory
+  /// entries for a repository whose pack is a tenth of that, and a working
+  /// tree the filesystem struggles to walk. Objects arrive packed; keeping
+  /// them packed is not an optimisation so much as declining to undo one.
+  ///
+  /// Returns the path of the pack that was written, or null when [objects] is
+  /// empty — an empty pack is legal and there is nothing to gain by keeping
+  /// one.
+  String? writePack({
+    required Uint8List packBytes,
+    required List<PackedObject> objects,
+    required ObjectId packChecksum,
+  }) =>
+      _install(
+        objects: objects,
+        packChecksum: packChecksum,
+        place: (destination) =>
+            File('$destination.tmp')..writeAsBytesSync(packBytes, flush: true),
+      );
+
+  /// Stores a packfile that is already on disk, moving it into place rather
+  /// than copying its bytes through memory.
+  ///
+  /// This is what a fetch uses: the pack was streamed to a temporary file as
+  /// it arrived, and reading it back only to write it out again would undo the
+  /// point of streaming it.
+  String? writePackFile({
+    required String packPath,
+    required List<PackedObject> objects,
+    required ObjectId packChecksum,
+  }) =>
+      _install(
+        objects: objects,
+        packChecksum: packChecksum,
+        place: (_) => File(packPath),
+      );
+
+  /// Writes the index, puts the pack beside it, and opens the pair.
+  ///
+  /// [place] returns a file holding the pack, which is then renamed into its
+  /// final name — so the caller decides whether that file was written here or
+  /// arrived already.
+  String? _install({
+    required List<PackedObject> objects,
+    required ObjectId packChecksum,
+    required File Function(String destination) place,
+  }) {
+    if (objects.isEmpty) return null;
+
+    final directory = Directory(p.join(loose.objectsDirectory, 'pack'))
+      ..createSync(recursive: true);
+    final name = PackIndexWriter.packName(objects.map((o) => o.id));
+    final packPath = p.join(directory.path, '$name.pack');
+    final indexPath = p.join(directory.path, '$name.idx');
+
+    // Already here: the name is a hash of the object set, so an identical set
+    // has been stored before and rewriting it would only risk truncating a
+    // pack something else is reading.
+    if (File(packPath).existsSync() && File(indexPath).existsSync()) {
+      return packPath;
+    }
+
+    // The index goes down first and the pack is renamed into place after it.
+    // A reader skips a pack with no index, so the window where the pair is
+    // incomplete is a window where neither is used, rather than one where a
+    // pack is read with an index that does not describe it.
+    File(indexPath).writeAsBytesSync(
+      PackIndexWriter.build(objects: objects, packChecksum: packChecksum),
+      flush: true,
+    );
+    place(packPath).renameSync(packPath);
+
+    final pack = PackFile.open(packPath);
+    pack.externalBase = (id) {
+      final base = readRaw(id);
+      if (base == null) throw MissingObjectException(id);
+      return base;
+    };
+    // Newest first, which is where a recently fetched object is most likely
+    // to be.
+    packs.insert(0, pack);
+
+    return packPath;
+  }
 
   /// Every name the store holds, loose and packed. Names may repeat when an
   /// object is stored both ways, which is legal and common after a repack.

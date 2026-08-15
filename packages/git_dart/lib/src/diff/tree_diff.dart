@@ -60,20 +60,38 @@ class DiffEntry {
 /// nothing. Entries come back sorted by path.
 ///
 /// Renames are detected rather than recorded, because git stores whole objects
-/// and does not write down that a file moved (`algorithms.diff`). Only exact
-/// renames are found here — a deletion and an addition of the identical blob.
-/// Similarity detection, which is what finds a file that moved *and* changed,
-/// is not implemented.
+/// and does not write down that a file moved: it is inferred by similarity,
+/// after the fact, and heuristically (`algorithms.diff`).
+///
+/// Two passes. Identical content is paired first and exactly — a file that
+/// moved and was not touched. What is left is compared by content, and a
+/// deletion and an addition that are at least [renameThreshold] percent alike
+/// are called a rename. Without the second pass a file that moved *and* was
+/// edited reads as an unrelated deletion and addition, which loses its history
+/// at exactly the moment someone is trying to follow it.
+///
+/// The comparison is quadratic in the number of unpaired files, so it stops
+/// at [renameLimit] pairs and leaves the rest as adds and deletes. Git draws
+/// the same line for the same reason, and says so rather than getting slow.
 List<DiffEntry> diffTrees(
   ObjectStore objects,
   Tree? before,
   Tree? after, {
   bool detectRenames = true,
+  int renameThreshold = 50,
+  int renameLimit = 1000,
 }) {
   final changes = <DiffEntry>[];
   _walk(objects, before, after, '', changes);
   changes.sort((a, b) => a.path.compareTo(b.path));
-  return detectRenames ? _pairExactRenames(changes) : changes;
+  return detectRenames
+      ? _pairRenames(
+          objects,
+          changes,
+          threshold: renameThreshold,
+          limit: renameLimit,
+        )
+      : changes;
 }
 
 void _walk(
@@ -178,24 +196,94 @@ void _expand(
   ));
 }
 
-List<DiffEntry> _pairExactRenames(List<DiffEntry> changes) {
-  final deletions = <ObjectId, DiffEntry>{};
+List<DiffEntry> _pairRenames(
+  ObjectStore objects,
+  List<DiffEntry> changes, {
+  required int threshold,
+  required int limit,
+}) {
+  final byOldId = <ObjectId, DiffEntry>{};
   for (final change in changes) {
     if (change.kind == ChangeKind.deleted && change.oldId != null) {
-      deletions[change.oldId!] = change;
+      byOldId[change.oldId!] = change;
     }
   }
-  if (deletions.isEmpty) return changes;
 
   final paired = <DiffEntry>{};
   final renames = <DiffEntry, DiffEntry>{};
-  for (final change in changes) {
-    if (change.kind != ChangeKind.added) continue;
-    final deletion = deletions[change.newId];
-    if (deletion == null || paired.contains(deletion)) continue;
-    paired.add(deletion);
-    renames[change] = deletion;
+
+  // ---- pass one: identical content ----
+  //
+  // A file that moved and was not touched. Exact, cheap, and the common case,
+  // so it runs first and takes those pairs out of the expensive pass.
+  if (byOldId.isNotEmpty) {
+    for (final change in changes) {
+      if (change.kind != ChangeKind.added) continue;
+      final deletion = byOldId[change.newId];
+      if (deletion == null || paired.contains(deletion)) continue;
+      paired.add(deletion);
+      renames[change] = deletion;
+    }
   }
+
+  // ---- pass two: similar content ----
+  final deletions = [
+    for (final change in changes)
+      if (change.kind == ChangeKind.deleted &&
+          change.oldId != null &&
+          !paired.contains(change))
+        change,
+  ];
+  final additions = [
+    for (final change in changes)
+      if (change.kind == ChangeKind.added &&
+          change.newId != null &&
+          !renames.containsKey(change))
+        change,
+  ];
+
+  if (deletions.isNotEmpty &&
+      additions.isNotEmpty &&
+      deletions.length * additions.length <= limit) {
+    // Fingerprints are taken once per file rather than once per pair: the
+    // comparison is quadratic and reading each blob for every candidate would
+    // make it quadratic in bytes too.
+    final sources = {
+      for (final deletion in deletions)
+        deletion: _fingerprint(objects, deletion.oldId!),
+    };
+
+    final takenSource = <DiffEntry>{};
+    for (final addition in additions) {
+      final target = _fingerprint(objects, addition.newId!);
+      if (target == null) continue;
+
+      DiffEntry? best;
+      var bestScore = threshold - 1;
+
+      for (final deletion in deletions) {
+        if (takenSource.contains(deletion)) continue;
+        final source = sources[deletion];
+        if (source == null) continue;
+
+        final score = _similarity(source, target);
+        // Ties go to the first by path, which is the order `changes` is
+        // already in — so the answer does not depend on map iteration order.
+        if (score > bestScore) {
+          bestScore = score;
+          best = deletion;
+        }
+      }
+
+      if (best != null) {
+        takenSource.add(best);
+        paired.add(best);
+        renames[addition] = best;
+      }
+    }
+  }
+
+  if (renames.isEmpty) return changes;
 
   return [
     for (final change in changes)
@@ -213,4 +301,85 @@ List<DiffEntry> _pairExactRenames(List<DiffEntry> changes) {
         else
           change,
   ];
+}
+
+/// How much of a file is worth comparing before it is called too big.
+///
+/// A rename between two very large files is worth less than the time to prove
+/// it, and holding two of them to find out is worse. Git has the same cutoff
+/// and calls it `core.bigFileThreshold`.
+const _bigFile = 32 * 1024 * 1024;
+
+/// A file reduced to what it is made of: how many bytes fall on each distinct
+/// line, and how many bytes in total.
+///
+/// Lines rather than bytes because a rename that also edits a file keeps most
+/// of its lines and almost none of its byte offsets. Null when the object is
+/// missing or too large to be worth comparing.
+({Map<int, int> weights, int total})? _fingerprint(
+  ObjectStore objects,
+  ObjectId id,
+) {
+  final raw = objects.readRaw(id);
+  if (raw == null) return null;
+  final content = raw.content;
+  if (content.length > _bigFile) return null;
+
+  final weights = <int, int>{};
+  var start = 0;
+  var hash = 0;
+
+  for (var i = 0; i <= content.length; i++) {
+    if (i == content.length || content[i] == 0x0a) {
+      if (i > start || i < content.length) {
+        final length = i - start + 1;
+        weights[hash] = (weights[hash] ?? 0) + length;
+      }
+      start = i + 1;
+      hash = 0;
+      continue;
+    }
+    // FNV-1a over the line. Any spreading hash does; this one is short and
+    // does not need a table.
+    hash = ((hash ^ content[i]) * 0x01000193) & 0xffffffff;
+  }
+
+  return (weights: weights, total: content.length);
+}
+
+/// How alike two files are, as a percentage.
+///
+/// The shared weight over the larger of the two, so that a file which grew is
+/// not called a rename of everything smaller than it. A heuristic, and
+/// deliberately so: nothing recorded that the file moved, and this is an
+/// inference about intent from content.
+int _similarity(
+  ({Map<int, int> weights, int total}) source,
+  ({Map<int, int> weights, int total}) target,
+) {
+  if (source.total == 0 && target.total == 0) return 100;
+
+  final larger = source.total > target.total ? source.total : target.total;
+  if (larger == 0) return 0;
+
+  // A file cannot be half-alike to one twice its size, so pairs that far apart
+  // are rejected without looking at their content.
+  final smaller = source.total < target.total ? source.total : target.total;
+  if (smaller * 100 < larger * 20) return 0;
+
+  var common = 0;
+  final walk = source.weights.length < target.weights.length
+      ? source.weights
+      : target.weights;
+  final other = identical(walk, source.weights)
+      ? target.weights
+      : source.weights;
+
+  for (final entry in walk.entries) {
+    final theirs = other[entry.key];
+    if (theirs == null) continue;
+    common += entry.value < theirs ? entry.value : theirs;
+  }
+
+  return (common * 100) ~/ larger;
 }

@@ -16,8 +16,10 @@ import 'objects/identity.dart';
 import 'objects/tag.dart';
 import 'objects/tree.dart';
 import 'refs/ref_store.dart';
+import 'refs/reflog.dart';
 import 'remote/remote.dart';
 import 'storage/object_store.dart';
+import 'worktree/attributes.dart';
 import 'worktree/checkout.dart';
 import 'worktree/ignore.dart';
 import 'worktree/status.dart';
@@ -95,12 +97,17 @@ class Repository {
 
   /// Opens a known git directory without searching.
   factory Repository.at(String gitDirectory, {String? workTree}) {
-    return Repository._(
+    final refs = RefStore(gitDirectory);
+    final repository = Repository._(
       gitDirectory: gitDirectory,
       workTree: workTree,
       objects: ObjectStore.open(p.join(gitDirectory, 'objects')),
-      refs: RefStore(gitDirectory),
+      refs: refs,
     );
+    // The store asks at the moment of a move, so the timestamp is the move's
+    // own and a config edited mid-session is picked up.
+    refs.identityFor = repository.identityFromConfig;
+    return repository;
   }
 
   bool get isBare => workTree == null;
@@ -113,7 +120,20 @@ class Repository {
   GitConfig get config => _config ??= GitConfig.forRepository(gitDirectory);
 
   /// Forgets the cached [config], for a caller that has just changed it.
-  void reloadConfig() => _config = null;
+  void reloadConfig() {
+    _config = null;
+    _attributes = null;
+  }
+
+  Attributes? _attributes;
+
+  /// The `.gitattributes` rules in force, with `core.autocrlf` and `core.eol`.
+  ///
+  /// Cached for the same reason the config is: they are consulted once per
+  /// file on every status, checkout and add.
+  Attributes get attributes => _attributes ??= workTree == null
+      ? Attributes()
+      : loadAttributes(workTree!, gitDirectory, config: config);
 
   void close() => objects.close();
 
@@ -139,7 +159,18 @@ class Repository {
   /// takes the nth parent, and `^{kind}` peels to a kind. Returns null when
   /// nothing matches — including when an abbreviation matches more than one
   /// object, since a wrong object is worse than no object.
+  ///
+  /// `<ref>@{n}` reads the reflog instead of the commit graph: it is where the
+  /// ref was n moves ago, which is a different question from where it is n
+  /// parents back and is the only way to name a commit nothing points at.
   ObjectId? resolve(String revision) {
+    final reflog = RegExp(r'^(.*)@\{(\d+)\}$').firstMatch(revision);
+    if (reflog != null) {
+      final name = reflog.group(1)!;
+      final n = int.parse(reflog.group(2)!);
+      return _resolveReflog(name.isEmpty ? 'HEAD' : name, n);
+    }
+
     final suffix = RegExp(r'[\^~]').firstMatch(revision);
     if (suffix == null) return _resolveName(revision);
 
@@ -179,6 +210,27 @@ class Repository {
     }
     return id;
   }
+
+  /// `<ref>@{n}`, trying the ref by every name a ref can be spelled by.
+  ObjectId? _resolveReflog(String name, int n) {
+    for (final candidate in [
+      name,
+      'refs/heads/$name',
+      'refs/remotes/$name',
+    ]) {
+      final log = refs.reflogFor(candidate);
+      if (log.isEmpty) continue;
+      return log.entryAt(n);
+    }
+    return null;
+  }
+
+  /// The recorded history of a ref: where it has been, in what order and why.
+  ///
+  /// A commit that a branch has moved off is reachable from nothing and is
+  /// invisible to [log] and to [reachable]. This is the only place it is still
+  /// named (`refs.reflog`).
+  Reflog reflogFor(String refPath) => refs.reflogFor(refPath);
 
   Commit? _asCommit(ObjectId id) {
     if (!objects.contains(id)) return null;
@@ -357,12 +409,14 @@ class Repository {
     ObjectId? before,
     ObjectId? after, {
     bool detectRenames = true,
+    int renameThreshold = 50,
   }) =>
       diffTrees(
         objects,
         before == null ? null : treeOf(before),
         after == null ? null : treeOf(after),
         detectRenames: detectRenames,
+        renameThreshold: renameThreshold,
       );
 
   /// What [commit] changed, against its first parent. A merge is diffed
@@ -423,15 +477,36 @@ class Repository {
       throw ArgumentError.value(revision, 'revision', 'has no tree');
     }
 
+    final from = _describeHeadPosition();
     final result = checkoutTree(this, tree, force: force);
 
     final branch = _branchNamed(revision);
     if (branch != null && !detach) {
-      refs.writeSymbolic('HEAD', branch);
+      refs.writeSymbolic(
+        'HEAD',
+        branch,
+        reflogMessage: 'checkout: moving from $from to '
+            '${branch.substring('refs/heads/'.length)}',
+      );
     } else {
-      refs.write('HEAD', peel(id) is Commit ? (peel(id) as Commit).id : id);
+      refs.write(
+        'HEAD',
+        peel(id) is Commit ? (peel(id) as Commit).id : id,
+        reflogMessage: 'checkout: moving from $from to $revision',
+      );
     }
     return result;
+  }
+
+  /// What HEAD is on, for a reflog line: the branch's short name, or the
+  /// commit when detached. Git writes exactly this and it is what makes
+  /// `checkout -` possible.
+  String _describeHeadPosition() {
+    final branch = refs.currentBranch;
+    if (branch != null && branch.startsWith('refs/heads/')) {
+      return branch.substring('refs/heads/'.length);
+    }
+    return headId?.hex ?? 'an unborn branch';
   }
 
   String? _branchNamed(String revision) {
@@ -496,9 +571,26 @@ class Repository {
     // directory where the old ref's file is, and a file and a directory
     // cannot share a name — which is why git deletes before it creates. If
     // the write then fails, the old ref goes back.
+    // The log follows the branch: it is the same branch under a new name, and
+    // carrying it over is the difference between a rename and a delete
+    // followed by a create. It is restored before the write below, so that
+    // write's own entry appends to the history rather than starting a new one.
+    final log = File(Reflog.pathOf(gitDirectory, 'refs/heads/$from'));
+    final carried = log.existsSync() ? log.readAsStringSync() : null;
+
     refs.delete('refs/heads/$from');
+    if (carried != null) {
+      File(Reflog.pathOf(gitDirectory, 'refs/heads/$to'))
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync(carried);
+    }
+
     try {
-      refs.write('refs/heads/$to', id);
+      refs.write(
+        'refs/heads/$to',
+        id,
+        reflogMessage: 'branch: renamed $from to $to',
+      );
     } catch (_) {
       refs.write('refs/heads/$from', id);
       rethrow;
@@ -506,7 +598,13 @@ class Repository {
 
     // HEAD names the branch by path, so it would otherwise point at a ref
     // that no longer exists — which reads as an unborn branch.
-    if (wasCurrent) refs.writeSymbolic('HEAD', 'refs/heads/$to');
+    if (wasCurrent) {
+      refs.writeSymbolic(
+        'HEAD',
+        'refs/heads/$to',
+        reflogMessage: 'branch: renamed $from to $to',
+      );
+    }
 
     _renameBranchConfig(from, to);
   }
@@ -569,7 +667,7 @@ class Repository {
     if (id == null) {
       throw StateError('there is no commit for the branch to point at');
     }
-    refs.write(path, id);
+    refs.write(path, id, reflogMessage: 'branch: created from HEAD');
   }
 
   // ---- writing ------------------------------------------------------------
@@ -679,6 +777,155 @@ class Repository {
     reloadConfig();
   }
 
+  // ---- tags ---------------------------------------------------------------
+
+  /// Creates a tag at [at], or at HEAD.
+  ///
+  /// With a [message] this writes a tag *object* — an annotated tag, which is
+  /// a real object with a tagger and a message, and which the ref then points
+  /// at. Without one it writes only the ref, which is what a lightweight tag
+  /// is: a name for a commit and nothing else. The difference is visible
+  /// forever afterwards, because only one of the two can carry who made it.
+  ///
+  /// Returns what the ref was pointed at — the tag object for an annotated
+  /// tag, the target itself for a lightweight one.
+  ObjectId createTag(
+    String name, {
+    ObjectId? at,
+    String? message,
+    Identity? tagger,
+    bool force = false,
+  }) {
+    final problem = branchNameProblem(name);
+    if (problem != null) throw ArgumentError.value(name, 'name', problem);
+
+    final path = name.startsWith('refs/') ? name : 'refs/tags/$name';
+    if (!force && refs.read(path) != null) {
+      throw StateError('a tag named $name already exists');
+    }
+
+    final target = at ?? headId;
+    if (target == null) {
+      throw StateError('there is no commit for the tag to point at');
+    }
+    if (!objects.contains(target)) {
+      throw ArgumentError.value(target, 'at', 'names no object here');
+    }
+
+    if (message == null) {
+      refs.write(path, target, reflogMessage: 'tag: created');
+      return target;
+    }
+
+    final who = tagger ?? identityFromConfig();
+    if (who == null) {
+      throw StateError(
+        'no user.name and user.email are configured for this repository',
+      );
+    }
+
+    final object = Tag(
+      target: target,
+      targetKind: objects.read(target).kind,
+      name: name.startsWith('refs/tags/')
+          ? name.substring('refs/tags/'.length)
+          : name,
+      tagger: who,
+      rawMessage: Uint8List.fromList(
+        utf8.encode(message.endsWith('\n') ? message : '$message\n'),
+      ),
+    );
+    final id = objects.write(object);
+    refs.write(path, id, reflogMessage: 'tag: created');
+    return id;
+  }
+
+  /// Removes a tag. The object it pointed at is left alone; what makes it
+  /// unreachable is nothing pointing at it any more.
+  void deleteTag(String name) {
+    final path = name.startsWith('refs/') ? name : 'refs/tags/$name';
+    if (refs.read(path) == null) throw StateError('no tag named $name');
+    refs.delete(path);
+  }
+
+  /// Every tag, with the commit it ultimately names.
+  ///
+  /// An annotated tag's ref points at a tag object rather than at a commit, so
+  /// a caller that wants "where does this tag put me" has to peel it. Doing it
+  /// here means no caller forgets.
+  List<({String name, ObjectId ref, ObjectId target, Tag? annotation})>
+      listTags() {
+    final out = <({
+      String name,
+      ObjectId ref,
+      ObjectId target,
+      Tag? annotation
+    })>[];
+
+    for (final ref in refs.tags) {
+      final id = refs.resolve(ref.path);
+      if (id == null) continue;
+      final object = objects.contains(id) ? objects.read(id) : null;
+      out.add((
+        name: ref.shortName,
+        ref: id,
+        target: object is Tag ? peel(id).id : id,
+        annotation: object is Tag ? object : null,
+      ));
+    }
+    return out;
+  }
+
+  // ---- a merge in progress ------------------------------------------------
+
+  /// The commit being merged in, from `MERGE_HEAD`, or null when no merge is
+  /// under way.
+  ///
+  /// A conflicted merge leaves this file behind precisely so that the commit
+  /// which resolves it can record the second parent. Without reading it back,
+  /// resolving a conflict produces an ordinary commit and the merge is lost:
+  /// the branch stays unmerged and the same conflict returns next time.
+  ObjectId? get mergeHead {
+    final file = File(p.join(gitDirectory, 'MERGE_HEAD'));
+    if (!file.existsSync()) return null;
+    final text = file.readAsStringSync().trim();
+    if (text.isEmpty) return null;
+    return ObjectId.fromHex(text.split(RegExp(r'\s')).first);
+  }
+
+  /// The message a conflicted merge prepared, from `MERGE_MSG`.
+  String? get mergeMessage {
+    final file = File(p.join(gitDirectory, 'MERGE_MSG'));
+    return file.existsSync() ? file.readAsStringSync() : null;
+  }
+
+  bool get isMerging => mergeHead != null;
+
+  /// Forgets a merge in progress without touching the index or working tree.
+  void clearMergeState() {
+    for (final name in const ['MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE']) {
+      final file = File(p.join(gitDirectory, name));
+      if (file.existsSync()) file.deleteSync();
+    }
+  }
+
+  /// Abandons a merge: the index and working tree go back to HEAD and the
+  /// merge state is dropped.
+  ///
+  /// Conflict markers written into the working tree are overwritten, which is
+  /// the point — they are not content anyone wants to keep.
+  CheckoutResult abortMerge() {
+    if (!isMerging) throw StateError('no merge is in progress');
+    final head = headId;
+    if (head == null) throw StateError('there is no HEAD to go back to');
+    final tree = treeOf(head);
+    if (tree == null) throw StateError('HEAD has no tree');
+
+    final result = checkoutTree(this, tree, force: true);
+    clearMergeState();
+    return result;
+  }
+
   // ---- the staging area ---------------------------------------------------
 
   /// Stages [path] as it is in the working tree.
@@ -742,9 +989,15 @@ class Repository {
     }
 
     final isSymlink = link.existsSync() && !file.existsSync();
-    final content = isSymlink
+    final raw = isSymlink
         ? Uint8List.fromList(utf8.encode(link.targetSync()))
         : file.readAsBytesSync();
+
+    // What is stored is the converted form, not what is on disk. A symlink's
+    // target is a path and is never converted.
+    final content = isSymlink
+        ? raw
+        : toStorage(raw, attributes.conversionFor(path, raw));
     final id = objects.write(Blob(content));
 
     // The mode git already recorded wins, so staging on Windows — where the
@@ -766,7 +1019,13 @@ class Repository {
       mode: mode.numeric,
       ctimeSeconds: seconds,
       mtimeSeconds: seconds,
-      size: content.length,
+      // The size of the file *on disk*, not of the blob that was stored. The
+      // stat fields are a cache of the working tree, so they have to describe
+      // the working tree: recording the converted length makes every check
+      // find a mismatch, re-read the file, and — in git's case — report a
+      // CRLF file as modified for ever. Confirmed against `git ls-files
+      // --debug`, which records the working-tree size for exactly this reason.
+      size: raw.length,
     );
 
     // Any conflict stages for this path are resolved by staging it.
@@ -884,8 +1143,16 @@ class Repository {
   /// Writes a tree from the index, a commit with HEAD as its parent, and moves
   /// the current branch — or creates it, when HEAD is unborn. Returns the new
   /// commit's name.
+  ///
+  /// When a merge is in progress the commit being merged in becomes the second
+  /// parent and the merge state is cleared, which is what makes resolving a
+  /// conflict finish the merge rather than write an unrelated commit on top of
+  /// it. The order matters: HEAD first, since the first parent is the branch
+  /// merged into (`objects.commit-format`).
+  ///
+  /// [message] may be empty when a merge prepared one in `MERGE_MSG`.
   ObjectId commitIndex({
-    required String message,
+    String message = '',
     Identity? author,
     Identity? committer,
     bool allowEmpty = false,
@@ -897,7 +1164,10 @@ class Repository {
     if (index != null && index.hasConflicts) {
       throw StateError('cannot commit while the index has conflicts');
     }
-    if (message.trim().isEmpty) {
+
+    final merging = mergeHead;
+    final text = message.trim().isEmpty ? (mergeMessage ?? '') : message;
+    if (text.trim().isEmpty) {
       throw StateError('a commit message is required');
     }
 
@@ -911,20 +1181,29 @@ class Repository {
     final tree = writeTreeFromIndex();
     final parent = headId;
 
-    if (!allowEmpty && parent != null) {
+    // A merge that resolved to exactly our own tree still has to be committed:
+    // the point of the commit is the second parent, not the tree.
+    if (!allowEmpty && merging == null && parent != null) {
       final parentCommit = objects.readTyped<Commit>(parent);
       if (parentCommit.tree == tree) {
         throw StateError('nothing is staged');
       }
     }
 
-    return commitTree(
+    final id = commitTree(
       tree: tree,
-      message: message,
+      message: text,
       author: who,
       committer: committer ?? who,
-      parents: [if (parent != null) parent],
+      parents: [
+        if (parent != null) parent,
+        if (merging != null) merging,
+      ],
+      reflogMessage: merging != null ? 'commit (merge)' : 'commit',
     );
+
+    if (merging != null) clearMergeState();
+    return id;
   }
 
   ObjectId writeBlobFromFile(String path) =>
@@ -941,6 +1220,7 @@ class Repository {
     Identity? committer,
     List<ObjectId>? parents,
     bool updateHead = true,
+    String reflogMessage = 'commit',
   }) {
     final currentHead = headId;
     final commit = Commit.build(
@@ -955,9 +1235,21 @@ class Repository {
     if (updateHead) {
       final branch = refs.currentBranch;
       // On a detached HEAD there is no branch to move, so HEAD itself moves.
-      refs.write(branch ?? 'HEAD', id);
+      refs.write(
+        branch ?? 'HEAD',
+        id,
+        reflogMessage: '$reflogMessage: ${_summaryOf(message)}',
+      );
     }
     return id;
+  }
+
+  /// A commit message's first line, which is what a reflog entry carries.
+  static String _summaryOf(String message) {
+    final firstLine = const LineSplitter()
+        .convert(message)
+        .firstWhere((line) => line.trim().isNotEmpty, orElse: () => '');
+    return firstLine.length > 120 ? firstLine.substring(0, 120) : firstLine;
   }
 
   /// Builds tree objects from the index's ordinary-stage entries and writes

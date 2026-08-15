@@ -456,6 +456,53 @@ void main() {
     });
   });
 
+  group('remote counts', () {
+    testWidgets('follow the branch as it moves', (tester) async {
+      // A remote to be ahead of, and a repository already level with it.
+      final origin = p.join(scratch.path, 'counts-origin.git');
+      Process.runSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+
+      final state = await pumpExplorer(tester);
+      await act(tester, () => state.addRemote(repoPath, 'counts', origin));
+      await act(tester, () => state.pushRemote(repoPath, 'counts'));
+      await act(tester, () => state.selectRepository(repoPath));
+      await tapAndWait(
+        tester,
+        find.byWidgetPredicate(
+          (w) => w is Tab && (w.text ?? '').startsWith('Remotes'),
+        ),
+      );
+
+      expect(find.text('up to date'), findsOneWidget);
+
+      // A commit moves the branch, and the tile has to keep up: before this
+      // was wired, it kept showing whatever it said when the pane opened.
+      write('counted.txt', 'new\n');
+      await act(
+        tester,
+        () => state.setStaged(repoPath, 'counted.txt', staged: true),
+      );
+      await act(
+        tester,
+        () async => state.commitStaged(repoPath, 'one ahead'),
+      );
+
+      expect(find.text('up to date'), findsNothing);
+      expect(
+        state.remotes!.firstWhere((r) => r.name == 'counts').ahead,
+        1,
+      );
+
+      // reset --hard removes the committed file too, so there is nothing
+      // left to delete by hand.
+      git(['reset', '--quiet', '--hard', 'HEAD~1']);
+      await act(tester, () => state.removeRemote(repoPath, 'counts'));
+      await act(tester, () => state.refresh(repoPath));
+      write('README.md', '# demo\nchanged\n');
+      write('scratch.txt', 'untracked\n');
+    });
+  });
+
   group('context menus', () {
     // Right-click is how a context menu is opened on a desktop. These went
     // missing once when the menus were moved to long-press alone, so each

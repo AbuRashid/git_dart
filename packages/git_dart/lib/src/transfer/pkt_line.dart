@@ -136,6 +136,74 @@ class PktLineReader {
   }
 }
 
+/// Reads pkt-lines out of a stream, a chunk at a time.
+///
+/// [PktLineReader] needs the whole message in memory before it can find the
+/// first packet, which is fine for an advertisement and is not fine for a
+/// pack: a clone's response is the size of the repository, and holding it
+/// whole to read it four bytes at a time is the difference between a clone
+/// that works and one that runs out of memory before it starts.
+///
+/// Bytes are fed in as they arrive and complete packets come out. A packet
+/// split across two chunks — which is the ordinary case, since a chunk
+/// boundary knows nothing about a packet boundary — is held until the rest of
+/// it turns up.
+class PktLineStreamReader {
+  final _buffer = BytesBuilder();
+  Uint8List _pending = Uint8List(0);
+
+  /// Feeds [chunk] in and returns whatever packets are now complete.
+  List<PktLine> add(List<int> chunk) {
+    if (_pending.isNotEmpty) {
+      _buffer.add(_pending);
+      _pending = Uint8List(0);
+    }
+    _buffer.add(chunk);
+    final bytes = _buffer.takeBytes();
+
+    final packets = <PktLine>[];
+    var at = 0;
+
+    while (true) {
+      if (at + 4 > bytes.length) break;
+      final header = ascii.decode(bytes.sublist(at, at + 4));
+      final length = int.tryParse(header, radix: 16);
+      if (length == null) {
+        throw FormatException('pkt-line length "$header" is not hexadecimal');
+      }
+
+      if (length < 4) {
+        at += 4;
+        packets.add(switch (length) {
+          0 => PktLine.flush,
+          1 => PktLine.delimiter,
+          2 => PktLine.responseEnd,
+          _ => throw const FormatException('0003 is not a valid pkt-line'),
+        });
+        continue;
+      }
+
+      // The length counts its own four characters. Not enough has arrived to
+      // read the payload: keep everything from this packet's start and wait.
+      if (at + length > bytes.length) break;
+      packets.add(PktLine(
+        PktKind.data,
+        Uint8List.fromList(bytes.sublist(at + 4, at + length)),
+      ));
+      at += length;
+    }
+
+    if (at < bytes.length) {
+      _pending = Uint8List.sublistView(bytes, at);
+    }
+    return packets;
+  }
+
+  /// True when nothing is waiting for more bytes — a stream that ended here
+  /// ended on a packet boundary.
+  bool get isComplete => _pending.isEmpty;
+}
+
 /// One ref in a v0 advertisement: an object name, a space, and the ref's path.
 ///
 /// The first line carries the server's capabilities after a NUL, which is

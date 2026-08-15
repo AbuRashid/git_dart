@@ -4,6 +4,38 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../object_id.dart';
+import '../objects/identity.dart';
+import 'reflog.dart';
+
+/// Thrown when a ref cannot be locked because someone else holds the lock.
+///
+/// The lock file is created exclusively, so this is a real answer rather than
+/// a guess: another writer is in the middle of moving this ref, and the right
+/// response is to fail rather than to overwrite whatever they are doing.
+class RefLockedException implements Exception {
+  final String refPath;
+  const RefLockedException(this.refPath);
+
+  @override
+  String toString() =>
+      'cannot lock $refPath: ${refPath.split('/').last}.lock already exists. '
+      'Another process is updating it, or a previous one left the lock behind.';
+}
+
+/// Thrown when a ref was not where the caller expected it.
+///
+/// The whole point of a compare-and-swap: a fetch that saw `abc` and writes
+/// `def` must not win over a commit that moved the same branch in between.
+class RefRaceException implements Exception {
+  final String refPath;
+  final ObjectId? expected;
+  final ObjectId? found;
+  const RefRaceException(this.refPath, this.expected, this.found);
+
+  @override
+  String toString() => 'refusing to move $refPath: it was expected at '
+      '${expected?.hex ?? 'nothing'} and is at ${found?.hex ?? 'nothing'}';
+}
 
 /// What a ref holds: either an object name, or the path of another ref.
 sealed class RefTarget {
@@ -61,7 +93,16 @@ class RefStore {
   /// The `.git` directory.
   final String gitDirectory;
 
-  RefStore(this.gitDirectory);
+  /// Who to record as having moved a ref, asked for at the moment of the move
+  /// so the timestamp is the move's own.
+  ///
+  /// A store with none writes no reflog. That is the honest behaviour rather
+  /// than inventing an identity: a log line attributing a branch move to
+  /// nobody in particular is worse than no line, because it looks like a
+  /// record and is not one.
+  Identity? Function()? identityFor;
+
+  RefStore(this.gitDirectory, {this.identityFor});
 
   String _pathOf(String refPath) =>
       p.join(gitDirectory, refPath.replaceAll('/', p.separator));
@@ -171,24 +212,167 @@ class RefStore {
   List<Ref> get tags => list(prefix: 'refs/tags/');
   List<Ref> get remoteBranches => list(prefix: 'refs/remotes/');
 
-  /// Points [refPath] at [id].
+  /// Points [refPath] at [id], and records the move in the reflog.
   ///
-  /// Written to a temporary file and renamed over the old one: a torn write
-  /// here loses a branch, and rename is the only widely available atomic
-  /// primitive (`refs.update-must-be-atomic`).
-  void write(String refPath, ObjectId id) =>
-      _writeAtomically(refPath, '${id.hex}\n');
+  /// Written to a lock file and renamed over the old one: a torn write here
+  /// loses a branch, and rename is the only widely available atomic primitive
+  /// (`refs.update-must-be-atomic`). The lock is created exclusively, so a
+  /// second writer fails rather than quietly racing the first — rename alone
+  /// makes each write whole, not each write the only one.
+  void write(String refPath, ObjectId id, {String? reflogMessage}) {
+    final before = _currentValueOf(refPath);
+    _writeAtomically(refPath, '${id.hex}\n');
+    _log(refPath, before, id, reflogMessage);
+  }
 
-  void writeSymbolic(String refPath, String target) =>
-      _writeAtomically(refPath, 'ref: $target\n');
+  /// Moves [refPath] only if it is still at [expected], and fails otherwise.
+  ///
+  /// [expected] of null means the ref must not exist. This is what a fetch or
+  /// a push needs: it decided what to write from a value it read some time
+  /// ago, and between the reading and the writing a commit may have moved the
+  /// same branch. Without the check the later write silently wins and the
+  /// commit is lost from the branch — findable in the reflog, and gone from
+  /// everything else.
+  void compareAndSwap(
+    String refPath, {
+    required ObjectId? expected,
+    required ObjectId to,
+    String? reflogMessage,
+  }) {
+    final found = _currentValueOf(refPath);
+    if (found != expected) {
+      throw RefRaceException(refPath, expected, found);
+    }
+    _writeAtomically(refPath, '${to.hex}\n');
+    _log(refPath, found, to, reflogMessage);
+  }
+
+  /// Points [refPath] at another ref, as `HEAD` points at the checked-out
+  /// branch.
+  ///
+  /// The reflog records where the ref *resolved* before and after, not the
+  /// paths: a checkout is a move from one commit to another, and that is what
+  /// makes the previous position recoverable.
+  void writeSymbolic(String refPath, String target, {String? reflogMessage}) {
+    final before = resolve(refPath);
+    _writeAtomically(refPath, 'ref: $target\n');
+    final after = resolve(refPath);
+    if (after != null) _log(refPath, before, after, reflogMessage);
+  }
+
+  /// The object [refPath] holds directly, without following symbolic targets
+  /// and without failing when it does not exist.
+  ObjectId? _currentValueOf(String refPath) {
+    final ref = read(refPath);
+    return switch (ref?.target) {
+      DirectRef(:final id) => id,
+      SymbolicRef(:final path) => resolve(path),
+      null => null,
+    };
+  }
 
   void _writeAtomically(String refPath, String contents) {
     final file = File(_pathOf(refPath));
-    file.parent.createSync(recursive: true);
-    final temporary = File('${file.path}.lock');
-    temporary.writeAsStringSync(contents);
-    temporary.renameSync(file.path);
+    final lock = _acquireLock(file);
+    try {
+      lock.writeAsStringSync(contents);
+      lock.renameSync(file.path);
+    } catch (_) {
+      if (lock.existsSync()) lock.deleteSync();
+      rethrow;
+    }
   }
+
+  /// Creates `<ref>.lock` exclusively, so that exactly one writer holds it.
+  ///
+  /// A lock left behind by a process that died stops every later write, which
+  /// is deliberate and is what git does: the alternative is deciding on its
+  /// owner's behalf that the interrupted update should be abandoned.
+  File _acquireLock(File file) {
+    file.parent.createSync(recursive: true);
+    final lock = File('${file.path}.lock');
+    try {
+      lock.createSync(exclusive: true);
+    } on FileSystemException {
+      throw RefLockedException(p.relative(file.path, from: gitDirectory));
+    }
+    return lock;
+  }
+
+  // ---- the reflog ---------------------------------------------------------
+
+  /// Whether a move of [refPath] is worth recording.
+  ///
+  /// Branches, remote-tracking refs and HEAD are logged always; anything else
+  /// is logged only once a log already exists, which is how a caller opts a
+  /// ref in. Tags are excluded on purpose: a tag that moves is a mistake
+  /// rather than a history worth keeping.
+  bool _shouldLog(String refPath) =>
+      refPath == 'HEAD' ||
+      refPath.startsWith('refs/heads/') ||
+      refPath.startsWith('refs/remotes/') ||
+      refPath.startsWith('refs/notes/') ||
+      File(Reflog.pathOf(gitDirectory, refPath)).existsSync();
+
+  void _log(
+    String refPath,
+    ObjectId? from,
+    ObjectId to,
+    String? message,
+  ) {
+    if (message == null) return;
+    if (!_shouldLog(refPath)) return;
+
+    final who = identityFor?.call();
+    if (who == null) return;
+
+    final entry = ReflogEntry(
+      from: from ?? ObjectId.zero,
+      to: to,
+      who: who,
+      message: message,
+    );
+    _appendReflog(refPath, entry);
+
+    // Moving the branch HEAD points at moves HEAD too, and HEAD's own log is
+    // what `HEAD@{n}` reads. Writing only the branch's log leaves the two
+    // disagreeing about where the working tree has been.
+    if (refPath != 'HEAD' && currentBranch == refPath) {
+      _appendReflog('HEAD', entry);
+    }
+  }
+
+  void _appendReflog(String refPath, ReflogEntry entry) {
+    final file = File(Reflog.pathOf(gitDirectory, refPath));
+    file.parent.createSync(recursive: true);
+    // Append rather than rewrite: the log is the one part of a repository
+    // where losing older lines defeats the purpose, and an append of one short
+    // line is as close to atomic as a filesystem offers.
+    file.writeAsStringSync(entry.line, mode: FileMode.append, flush: true);
+  }
+
+  /// The recorded history of one ref, oldest first. Empty when nothing has
+  /// been logged, which is not an error.
+  Reflog reflogFor(String refPath) => Reflog.read(gitDirectory, refPath);
+
+  /// Every ref that has a reflog, by path.
+  List<String> refsWithReflogs() {
+    final root = Directory(p.join(gitDirectory, 'logs'));
+    if (!root.existsSync()) return const [];
+    return [
+      for (final entry in root.listSync(recursive: true))
+        if (entry is File)
+          p.relative(entry.path, from: root.path).replaceAll(r'\', '/'),
+    ]..sort();
+  }
+
+  /// Drops a ref's log, as deleting the ref should.
+  void deleteReflog(String refPath) {
+    final file = File(Reflog.pathOf(gitDirectory, refPath));
+    if (file.existsSync()) file.deleteSync();
+  }
+
+  // ---- deleting -----------------------------------------------------------
 
   /// Removes a loose ref, leaving any packed one in place.
   bool deleteLoose(String refPath) {
@@ -220,6 +404,9 @@ class RefStore {
   /// loose file does nothing at all and the ref appears to come back. So the
   /// packed file is rewritten too, whole and atomically.
   bool delete(String refPath) {
+    // The log goes with the ref: it records where *this* ref has been, and a
+    // later ref of the same name has not been anywhere.
+    deleteReflog(refPath);
     final hadLoose = deleteLoose(refPath);
     final packed = File(p.join(gitDirectory, 'packed-refs'));
     if (!packed.existsSync()) return hadLoose;

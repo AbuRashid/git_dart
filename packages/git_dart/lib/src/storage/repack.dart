@@ -1,0 +1,331 @@
+import 'dart:io';
+
+import 'package:path/path.dart' as p;
+
+import '../object_id.dart';
+import '../objects/commit.dart';
+import '../objects/git_object.dart';
+import '../objects/tag.dart';
+import '../objects/tree.dart';
+import '../refs/reflog.dart';
+import '../repository.dart';
+import 'pack_writer.dart';
+
+class RepackResult {
+  /// Objects written into the new pack.
+  final int packed;
+
+  /// Loose files removed because the pack now holds them.
+  final int looseRemoved;
+
+  /// Packs removed because the new one contains everything they held.
+  final int packsRemoved;
+
+  /// Unreachable objects deleted outright.
+  final int pruned;
+
+  final String? packPath;
+
+  const RepackResult({
+    required this.packed,
+    this.looseRemoved = 0,
+    this.packsRemoved = 0,
+    this.pruned = 0,
+    this.packPath,
+  });
+
+  @override
+  String toString() => 'packed $packed, removed $looseRemoved loose and '
+      '$packsRemoved packs, pruned $pruned';
+}
+
+/// Everything a repository must keep: reachable from any ref, from HEAD, from
+/// the index, and from anything a reflog still names.
+///
+/// The reflogs are the part that is easy to leave out and expensive to get
+/// wrong. A commit a branch has moved off is unreachable from every ref and is
+/// exactly what the reflog exists to keep findable (`refs.reflog`); collecting
+/// it because no ref points at it would make every reset and every rebase
+/// irreversible the moment a repack ran.
+Set<ObjectId> liveObjects(Repository repository) {
+  final roots = <ObjectId>[];
+
+  for (final ref in repository.refs.list()) {
+    final id = repository.refs.resolve(ref.path);
+    if (id != null) roots.add(id);
+  }
+  final head = repository.headId;
+  if (head != null) roots.add(head);
+
+  // Also `refs/stash`, which `list` covers, and every position any log
+  // remembers.
+  for (final path in repository.refs.refsWithReflogs()) {
+    final log = Reflog.read(repository.gitDirectory, path);
+    for (final entry in log.entries) {
+      if (!entry.from.isZero) roots.add(entry.from);
+      if (!entry.to.isZero) roots.add(entry.to);
+    }
+  }
+
+  // The index holds blobs that no commit does — everything staged and not yet
+  // committed.
+  final index = repository.index;
+  final extra = <ObjectId>[];
+  if (index != null) {
+    for (final entry in index.entries) {
+      extra.add(entry.id);
+    }
+  }
+
+  // A state file may name a commit that nothing else does, mid-operation.
+  for (final name in const [
+    'MERGE_HEAD',
+    'ORIG_HEAD',
+    'CHERRY_PICK_HEAD',
+    'REVERT_HEAD',
+    'REBASE_HEAD',
+  ]) {
+    final file = File(p.join(repository.gitDirectory, name));
+    if (!file.existsSync()) continue;
+    final text = file.readAsStringSync().trim();
+    if (text.length == ObjectId.hexLength) {
+      try {
+        roots.add(ObjectId.fromHex(text));
+      } on FormatException {
+        // A state file holding something else is not a reason to stop.
+      }
+    }
+  }
+
+  final live = _reachable(repository, roots);
+  live.addAll(extra);
+  return live;
+}
+
+Set<ObjectId> _reachable(Repository repository, Iterable<ObjectId> roots) {
+  final seen = <ObjectId>{};
+  final pending = <ObjectId>[...roots];
+
+  while (pending.isNotEmpty) {
+    final id = pending.removeLast();
+    if (!seen.add(id)) continue;
+    final raw = repository.objects.readRaw(id);
+    if (raw == null) {
+      // A root naming an object that is not here: a shallow boundary, or a
+      // reflog line from before a fetch that was never completed.
+      seen.remove(id);
+      continue;
+    }
+    final object = GitObject.parse(raw.kind, raw.content);
+    switch (object) {
+      case Commit commit:
+        pending
+          ..add(commit.tree)
+          ..addAll(commit.parents);
+      case Tree tree:
+        for (final entry in tree.entries) {
+          if (!entry.mode.isSubmodule) pending.add(entry.id);
+        }
+      case Tag tag:
+        pending.add(tag.target);
+      case Blob():
+        break;
+    }
+  }
+  return seen;
+}
+
+/// Packs everything into one packfile and removes what the pack replaces.
+///
+/// A repository that only ever writes loose objects is correct and grows
+/// without bound: one file per version of every file, forever, uncompressed
+/// against each other. Repacking is what makes the size of a repository track
+/// the size of its history rather than the number of edits in it — the last
+/// step of the build order, and the one that makes the rest sustainable
+/// (`algorithms.build-order`).
+///
+/// With [prune], objects nothing can reach are deleted rather than carried
+/// into the new pack. Without it they are packed like everything else, which
+/// is slower to grow and never loses anything.
+RepackResult repack(
+  Repository repository, {
+  bool prune = false,
+  void Function(String message)? onProgress,
+}) {
+  final live = liveObjects(repository);
+
+  // Everything the store holds, once: an object may be both loose and packed
+  // after an earlier repack, which is legal and means the same object.
+  final all = <ObjectId>{...repository.objects.listAll()};
+  final keep = prune ? live : all;
+
+  onProgress?.call('packing ${keep.length} objects');
+
+  final writer = PackWriter();
+  for (final id in keep) {
+    final raw = repository.objects.readRaw(id);
+    if (raw == null) continue;
+    writer.add(id, raw.kind, raw.content);
+  }
+
+  if (writer.length == 0) {
+    return const RepackResult(packed: 0);
+  }
+
+  final built = writer.buildWithIndex();
+  final packPath = repository.objects.writePack(
+    packBytes: built.bytes,
+    objects: built.objects,
+    packChecksum: built.checksum,
+  );
+
+  final packed = {for (final object in built.objects) object.id};
+
+  // ---- the old copies ----
+  //
+  // Removed only after the new pack is in place and readable, so that at no
+  // point is an object in neither.
+  var looseRemoved = 0;
+  var pruned = 0;
+  final toDelete = <File>[];
+  final wasPacked = <String, bool>{};
+
+  for (final id in repository.objects.loose.listAll().toList()) {
+    final isLive = live.contains(id);
+    if (!packed.contains(id) && (isLive || !prune)) continue;
+    final file = File(repository.objects.loose.pathFor(id));
+    if (!file.existsSync()) continue;
+    toDelete.add(file);
+    wasPacked[file.path] = packed.contains(id);
+  }
+
+  for (final file in _deleteAll(toDelete)) {
+    if (wasPacked[file.path] ?? false) {
+      looseRemoved += 1;
+    } else {
+      pruned += 1;
+    }
+  }
+
+  // ---- packs the new one supersedes ----
+  var packsRemoved = 0;
+  final packDirectory =
+      Directory(p.join(repository.objects.loose.objectsDirectory, 'pack'));
+  if (packDirectory.existsSync()) {
+    for (final entry in packDirectory.listSync()) {
+      if (entry is! File || !entry.path.endsWith('.pack')) continue;
+      if (packPath != null && p.equals(entry.path, packPath)) continue;
+
+      // A pack is dropped only when every object in it is in the new one.
+      // Anything less and this would be deleting the only copy of something.
+      final index = '${p.withoutExtension(entry.path)}.idx';
+      if (!File(index).existsSync()) continue;
+
+      final held = repository.objects.packs
+          .where((pack) => p.equals(pack.packPath, entry.path))
+          .expand((pack) => pack.listAll())
+          .toSet();
+      if (held.isEmpty || !held.every(packed.contains)) continue;
+
+      // Closed first: an open handle on Windows stops the file being removed,
+      // and leaving it open would leak one per repack besides.
+      for (final pack in [...repository.objects.packs]) {
+        if (!p.equals(pack.packPath, entry.path)) continue;
+        pack.close();
+        repository.objects.packs.remove(pack);
+      }
+      _deleteAll([entry, File(index)]);
+      packsRemoved += 1;
+    }
+  }
+
+  // Empty fan-out directories left behind by the loose objects that went.
+  _pruneEmptyFanout(repository.objects.loose.objectsDirectory);
+
+  return RepackResult(
+    packed: built.objects.length,
+    looseRemoved: looseRemoved,
+    packsRemoved: packsRemoved,
+    pruned: pruned,
+    packPath: packPath,
+  );
+}
+
+/// What `git gc` is: repack, and drop what nothing can reach.
+///
+/// The two are one operation here because doing either alone is the awkward
+/// half — packing without pruning keeps everything forever, and pruning
+/// without packing leaves the survivors in the shape that was the problem.
+RepackResult gc(
+  Repository repository, {
+  void Function(String message)? onProgress,
+}) =>
+    repack(repository, prune: true, onProgress: onProgress);
+
+/// Objects nothing can reach — what a prune would delete.
+///
+/// Offered separately because "what would this throw away" is a question worth
+/// being able to ask before throwing it away.
+Set<ObjectId> unreachableObjects(Repository repository) {
+  final live = liveObjects(repository);
+  return {
+    for (final id in repository.objects.listAll())
+      if (!live.contains(id)) id,
+  };
+}
+
+/// Deletes [files], returning those that went.
+///
+/// Git writes a loose object and a pack index read-only, on the reasoning that
+/// an object's content is its name and may never change. On Windows a
+/// read-only file cannot be deleted at all, so a repack of a repository git
+/// created fails on the first object it tries to remove — while succeeding
+/// everywhere else, which is how this was missed until it ran here.
+///
+/// The attribute is cleared for the whole batch in one go rather than per
+/// file: this runs over every loose object in the repository, and a process
+/// each would cost more than the repack.
+List<File> _deleteAll(List<File> files) {
+  final gone = <File>[];
+  final stubborn = <File>[];
+
+  for (final file in files) {
+    try {
+      file.deleteSync();
+      gone.add(file);
+    } on FileSystemException {
+      stubborn.add(file);
+    }
+  }
+
+  if (stubborn.isEmpty || !Platform.isWindows) return gone;
+
+  // One call over the shared root, rather than one per file.
+  final roots = {for (final file in stubborn) p.dirname(file.path)};
+  for (final root in roots) {
+    Process.runSync('attrib', ['-R', p.join(root, '*'), '/S']);
+  }
+
+  for (final file in stubborn) {
+    try {
+      file.deleteSync();
+      gone.add(file);
+    } on FileSystemException {
+      // Held open by something else. Left behind rather than fought over:
+      // an extra copy of an object that is also in the pack is waste, not
+      // corruption.
+    }
+  }
+  return gone;
+}
+
+void _pruneEmptyFanout(String objectsDirectory) {
+  final root = Directory(objectsDirectory);
+  if (!root.existsSync()) return;
+  for (final entry in root.listSync()) {
+    if (entry is! Directory) continue;
+    final name = p.basename(entry.path);
+    if (name.length != 2) continue; // not a fan-out directory
+    if (entry.listSync().isEmpty) entry.deleteSync();
+  }
+}

@@ -7,6 +7,7 @@ import '../index/git_index.dart';
 import '../objects/git_object.dart';
 import '../objects/tree.dart';
 import '../repository.dart';
+import 'attributes.dart';
 import 'ignore.dart';
 
 /// One path's state, on both sides of the index.
@@ -177,7 +178,15 @@ RepositoryStatus statusOf(
         entry.mtimeSeconds >= indexWrittenAt.millisecondsSinceEpoch ~/ 1000;
     if (trustStatCache && !racy && entry.matchesStat(stat)) continue;
 
-    final id = hashObject(ObjectKind.blob, file.readAsBytesSync());
+    // Hashed as it would be *stored*, not as it sits on disk. Without the
+    // conversion, a CRLF working tree reports every text file as modified
+    // against an index that holds the LF form — which is the whole repository
+    // permanently dirty and no change made.
+    final raw = file.readAsBytesSync();
+    final id = hashObject(
+      ObjectKind.blob,
+      toStorage(raw, repo.attributes.conversionFor(entry.path, raw)),
+    );
     if (id != entry.id) unstaged[entry.path] = ChangeKind.modified;
   }
 

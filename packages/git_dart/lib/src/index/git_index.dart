@@ -7,6 +7,16 @@ import 'package:crypto/crypto.dart';
 import '../object_id.dart';
 import '../objects/tree.dart';
 
+/// Thrown when the index cannot be locked because another writer holds it.
+class IndexLockedException implements Exception {
+  final String path;
+  const IndexLockedException(this.path);
+
+  @override
+  String toString() => 'cannot lock the index: $path.lock already exists. '
+      'Another process is staging, or a previous one left the lock behind.';
+}
+
 /// The merge stage held in an entry's flags.
 ///
 /// Zero is the ordinary case. One, two and three hold the base, ours and
@@ -234,25 +244,42 @@ class GitIndex {
     );
   }
 
-  /// Serialises as version 2, dropping extensions.
+  /// Whether any entry carries a flag that only version 3 can express.
+  bool get _needsVersion3 =>
+      entries.any((entry) => entry.intentToAdd || entry.skipWorktree);
+
+  /// Serialises as version 2, or version 3 when an entry needs it, dropping
+  /// extensions.
   ///
   /// Extensions are caches git rebuilds, so dropping them is correct and slow
   /// — the same trade the stat fields offer. Writing them back is possible
   /// only for the ones this implementation understands, and writing a stale
   /// cached tree would be worse than writing none.
+  ///
+  /// The version is chosen rather than fixed because `intent-to-add` and
+  /// `skip-worktree` live in an extended flags field that version 2 has no
+  /// room for. Writing v2 regardless would parse cleanly and silently clear
+  /// them — a file marked skip-worktree would come back under management the
+  /// first time anything staged an unrelated path, which is the sort of loss
+  /// nothing reports.
   Uint8List serialise() {
     final sorted = [...entries]..sort(_compare);
+    final version = _needsVersion3 ? 3 : 2;
     final builder = BytesBuilder(copy: false);
 
     final header = ByteData(12)
       ..setUint32(0, _signature)
-      ..setUint32(4, 2)
+      ..setUint32(4, version)
       ..setUint32(8, sorted.length);
     builder.add(header.buffer.asUint8List());
 
     for (final entry in sorted) {
       final pathBytes = utf8.encode(entry.path);
-      final unpadded = 62 + pathBytes.length;
+      // An entry needs the extended field only if it has something to say in
+      // it; a v3 index may hold plain entries alongside extended ones.
+      final extended = entry.intentToAdd || entry.skipWorktree;
+      final fixed = extended ? 64 : 62;
+      final unpadded = fixed + pathBytes.length;
       final padded = (unpadded + 8) & ~7;
       final record = Uint8List(padded);
       final view = ByteData.sublistView(record);
@@ -273,9 +300,17 @@ class GitIndex {
           pathBytes.length < 0x0fff ? pathBytes.length : 0x0fff;
       var flags = nameLength | (entry.stage.value << 12);
       if (entry.assumeValid) flags |= 0x8000;
+      if (extended) flags |= 0x4000;
       view.setUint16(60, flags);
 
-      record.setRange(62, 62 + pathBytes.length, pathBytes);
+      if (extended) {
+        var extra = 0;
+        if (entry.intentToAdd) extra |= 0x2000;
+        if (entry.skipWorktree) extra |= 0x4000;
+        view.setUint16(62, extra);
+      }
+
+      record.setRange(fixed, fixed + pathBytes.length, pathBytes);
       builder.add(record);
     }
 
@@ -286,13 +321,26 @@ class GitIndex {
       ..setRange(body.length, body.length + ObjectId.byteLength, checksum);
   }
 
+  static const lockSuffix = '.lock';
+
   void writeTo(String path) {
-    // The same rename dance as a ref, for the same reason: a half-written
-    // index is a lost staging area.
+    // The same lock-and-rename as a ref, for the same reason: a half-written
+    // index is a lost staging area, and two writers renaming over each other
+    // is a staging area that holds neither of their work.
     final file = File(path);
-    final temporary = File('$path.lock');
-    temporary.writeAsBytesSync(serialise());
-    temporary.renameSync(file.path);
+    final lock = File('$path$lockSuffix');
+    try {
+      lock.createSync(exclusive: true);
+    } on FileSystemException {
+      throw IndexLockedException(path);
+    }
+    try {
+      lock.writeAsBytesSync(serialise());
+      lock.renameSync(file.path);
+    } catch (_) {
+      if (lock.existsSync()) lock.deleteSync();
+      rethrow;
+    }
   }
 
   static int _compare(IndexEntry a, IndexEntry b) {

@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:path/path.dart' as p;
+
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/git_object.dart';
@@ -10,9 +12,14 @@ import '../objects/tag.dart';
 import '../objects/tree.dart';
 import '../remote/remote.dart';
 import '../repository.dart';
+import '../storage/pack_indexer.dart';
 import '../storage/pack_parser.dart';
+import '../storage/pack_writer.dart';
+import 'connection.dart';
 import 'credentials.dart';
+import 'negotiator.dart';
 import 'pkt_line.dart';
+import 'protocol_v2.dart';
 
 /// One ref moved by a fetch.
 class RefUpdate {
@@ -40,37 +47,93 @@ class FetchResult {
   /// What the remote advertised, before any refspec was applied.
   final Map<String, ObjectId> advertised;
 
+  /// The branch the remote's HEAD names, when it said — which is what a clone
+  /// checks out. Version 0 has no way to ask and this is inferred there, or
+  /// null when it cannot be.
+  final String? defaultBranch;
+
+  /// Which protocol was actually spoken: 0 or 2.
+  final int protocolVersion;
+
+  /// How many rounds of negotiation it took.
+  final int negotiationRounds;
+
   const FetchResult({
     required this.updates,
     required this.objectsReceived,
     this.advertised = const {},
+    this.defaultBranch,
+    this.protocolVersion = 0,
+    this.negotiationRounds = 0,
   });
 
   List<RefUpdate> get changed =>
       [for (final u in updates) if (!u.isUnchanged) u];
 }
 
+/// Below this many objects, a fetch stores what arrived loose rather than as a
+/// pack.
+///
+/// Loose is simpler and is read without an index, which is worth having for a
+/// fetch that brought three commits. Above it the balance inverts sharply: a
+/// clone of anything real brings hundreds of thousands of objects, and one
+/// file each is a directory tree the filesystem struggles to walk and an order
+/// of magnitude more bytes on disk than the pack it came from. Git draws the
+/// same line, at the same place, for the same reason.
+const int unpackLimit = 100;
+
+const _agent = 'git/git_dart-0.1';
+
 /// Fetches from [remote] into [repository].
 ///
-/// Two paths, because they are genuinely different problems. A remote that is
-/// a directory on this machine is read directly — its object store is right
-/// there, and speaking a protocol to it would be ceremony. Anything else is
-/// fetched over smart HTTP.
+/// Four transports, which are three problems. A remote that is a directory on
+/// this machine is read directly — its object store is right there and
+/// speaking a protocol to it would be ceremony. Smart HTTP is
+/// request-and-response, so the whole conversation is re-sent each round. ssh
+/// and the git daemon are a single open connection, and differ from each other
+/// only in how it is opened.
+///
+/// Above all four, the protocol is the same: an advertisement, a negotiation,
+/// and a packfile.
 Future<FetchResult> fetch(
   Repository repository,
   Remote remote, {
   Credentials? credentials,
   void Function(String message)? onProgress,
+  String sshCommand = 'ssh',
+  bool allowVersion2 = true,
 }) async {
   if (remote.isLocal) {
     return _fetchLocal(repository, remote, onProgress);
   }
   if (remote.url.startsWith('http://') || remote.url.startsWith('https://')) {
-    return _fetchHttp(repository, remote, credentials, onProgress);
+    return _fetchHttp(
+      repository,
+      remote,
+      credentials,
+      onProgress,
+      allowVersion2,
+    );
   }
+
+  final connection = await connectTo(
+    remote.url,
+    'git-upload-pack',
+    sshCommand: sshCommand,
+  );
+  if (connection != null) {
+    return _fetchOverConnection(
+      repository,
+      remote,
+      connection,
+      onProgress,
+      allowVersion2,
+    );
+  }
+
   throw UnsupportedError(
-    'this build can fetch from a local path or over http(s); '
-    '${remote.url} is neither',
+    'no transport for ${remote.url}: this build speaks a local path, '
+    'http(s), ssh and git://',
   );
 }
 
@@ -107,6 +170,10 @@ Future<FetchResult> _fetchLocal(
     var copied = 0;
     final seen = <ObjectId>{};
     final pending = <ObjectId>[...wanted];
+    // Collected rather than written one at a time, so that a large fetch can
+    // be stored as a pack. A local remote is usually a clone's source, and a
+    // clone is exactly the case where one file per object hurts.
+    final arrived = <({ObjectId id, ObjectKind kind, Uint8List content})>[];
 
     while (pending.isNotEmpty) {
       final id = pending.removeLast();
@@ -116,7 +183,7 @@ Future<FetchResult> _fetchLocal(
       final raw = source.objects.readRaw(id);
       if (raw == null) continue;
 
-      repository.objects.write(GitObject.parse(raw.kind, raw.content));
+      arrived.add((id: id, kind: raw.kind, content: raw.content));
       copied += 1;
       if (copied % 500 == 0) onProgress?.call('copied $copied objects');
 
@@ -137,27 +204,54 @@ Future<FetchResult> _fetchLocal(
       }
     }
 
+    if (arrived.length <= unpackLimit) {
+      for (final object in arrived) {
+        repository.objects.write(GitObject.parse(object.kind, object.content));
+      }
+    } else {
+      onProgress?.call('packing ${arrived.length} objects');
+      final writer = PackWriter();
+      for (final object in arrived) {
+        writer.add(object.id, object.kind, object.content);
+      }
+      final built = writer.buildWithIndex();
+      repository.objects.writePack(
+        packBytes: built.bytes,
+        objects: built.objects,
+        packChecksum: built.checksum,
+      );
+    }
+
     return FetchResult(
       updates: _applyRefspecs(repository, remote, advertised),
       objectsReceived: copied,
       advertised: advertised,
+      defaultBranch: _inferDefaultBranch(source, advertised),
     );
   } finally {
     source.close();
   }
 }
 
+/// Which branch a local remote has checked out.
+String? _inferDefaultBranch(
+  Repository source,
+  Map<String, ObjectId> advertised,
+) {
+  final branch = source.refs.currentBranch;
+  return branch != null && advertised.containsKey(branch) ? branch : null;
+}
+
 // ---------------------------------------------------------------------------
 // smart HTTP
 // ---------------------------------------------------------------------------
 
-/// Protocol version 0, which every server still speaks
-/// (`transfer.two-protocols`).
 Future<FetchResult> _fetchHttp(
   Repository repository,
   Remote remote,
   Credentials? given,
   void Function(String)? onProgress,
+  bool allowVersion2,
 ) async {
   // A `user@host` URL carries the name but not the secret, and HttpClient
   // ignores both, so they are taken out here and sent as a header instead.
@@ -167,11 +261,48 @@ Future<FetchResult> _fetchHttp(
           ? split.credentials
           : null);
 
-  final withoutTrailingSlash = split.url.toString();
-  final base = withoutTrailingSlash.endsWith('/')
-      ? withoutTrailingSlash.substring(0, withoutTrailingSlash.length - 1)
-      : withoutTrailingSlash;
+  final full = split.url.toString();
+  final base = full.endsWith('/') ? full.substring(0, full.length - 1) : full;
   final client = HttpClient();
+
+  void authorise(HttpClientRequest request) {
+    request.headers.set('User-Agent', _agent);
+    if (allowVersion2) {
+      request.headers.set(gitProtocolHeader, gitProtocolVersion2);
+    }
+    if (credentials != null) {
+      request.headers.set(
+        HttpHeaders.authorizationHeader,
+        credentials.authorizationHeader,
+      );
+    }
+  }
+
+  Future<HttpClientResponse> post(List<int> body) async {
+    final request = await client.postUrl(Uri.parse('$base/git-upload-pack'));
+    request.headers
+      ..set('Content-Type', 'application/x-git-upload-pack-request')
+      ..set('Accept', 'application/x-git-upload-pack-result');
+    authorise(request);
+    request.add(body);
+
+    final response = await request.close();
+    if (response.statusCode == 401) {
+      await response.drain<void>();
+      throw AuthenticationRequired(
+        base,
+        realm: realmOf(response),
+        wereRejected: credentials != null,
+      );
+    }
+    if (response.statusCode != 200) {
+      throw HttpException(
+        'the server answered ${response.statusCode}',
+        uri: request.uri,
+      );
+    }
+    return response;
+  }
 
   try {
     // ---- the advertisement ----
@@ -179,13 +310,8 @@ Future<FetchResult> _fetchHttp(
     final adRequest = await client.getUrl(
       Uri.parse('$base/info/refs?service=git-upload-pack'),
     );
-    adRequest.headers.set('User-Agent', 'git/git_dart-0.1');
-    if (credentials != null) {
-      adRequest.headers.set(
-        HttpHeaders.authorizationHeader,
-        credentials.authorizationHeader,
-      );
-    }
+    authorise(adRequest);
+
     final adResponse = await adRequest.close();
     if (adResponse.statusCode == 401) {
       await adResponse.drain<void>();
@@ -204,107 +330,676 @@ Future<FetchResult> _fetchHttp(
     }
     final advertisement = await _collect(adResponse);
 
-    final parsed = _readAdvertisement(advertisement);
-    final advertised = parsed.refs;
-    final capabilities = parsed.capabilities;
+    // A version 2 server answers the same request with its capabilities
+    // instead of its refs. Which arrived is how the version is settled — the
+    // header was a request, not a decision.
+    final v2 = allowVersion2
+        ? readV2Capabilities(advertisement)
+        : const V2Capabilities({});
 
-    // ---- what to ask for ----
-    final wants = <ObjectId>[];
-    for (final entry in advertised.entries) {
-      if (remote.trackingRefFor(entry.key) == null) continue;
-      if (repository.objects.contains(entry.value)) continue;
-      if (!wants.contains(entry.value)) wants.add(entry.value);
+    // Awaited rather than returned: the client is closed in the `finally`
+    // below, and returning the future unawaited would close it out from under
+    // the request it describes.
+    if (v2.supportsFetch) {
+      return await _fetchHttpV2(repository, remote, v2, post, onProgress);
     }
-
-    if (wants.isEmpty) {
-      return FetchResult(
-        updates: _applyRefspecs(repository, remote, advertised),
-        objectsReceived: 0,
-        advertised: advertised,
-      );
-    }
-
-    // What we already have, so the server can send the difference rather than
-    // the repository (`transfer.negotiation`).
-    final haves = <ObjectId>[];
-    for (final ref in repository.refs.list()) {
-      final id = repository.refs.resolve(ref.path);
-      if (id != null && !haves.contains(id)) haves.add(id);
-      if (haves.length >= 256) break;
-    }
-
-    final agreed = <String>[
-      if (capabilities.contains('side-band-64k')) 'side-band-64k',
-      if (capabilities.contains('ofs-delta')) 'ofs-delta',
-      'agent=git/git_dart-0.1',
-    ];
-
-    final body = BytesBuilder();
-    for (var i = 0; i < wants.length; i++) {
-      final line = i == 0
-          ? 'want ${wants[i].hex} ${agreed.join(' ')}\n'
-          : 'want ${wants[i].hex}\n';
-      body.add(PktLine.text(line).encode());
-    }
-    body.add(PktLine.flush.encode());
-    for (final have in haves) {
-      body.add(PktLine.text('have ${have.hex}\n').encode());
-    }
-    body.add(PktLine.text('done\n').encode());
-
-    // ---- the pack ----
-    onProgress?.call('asking for ${wants.length} refs');
-    final request =
-        await client.postUrl(Uri.parse('$base/git-upload-pack'));
-    request.headers
-      ..set('Content-Type', 'application/x-git-upload-pack-request')
-      ..set('Accept', 'application/x-git-upload-pack-result')
-      ..set('User-Agent', 'git/git_dart-0.1');
-    if (credentials != null) {
-      request.headers.set(
-        HttpHeaders.authorizationHeader,
-        credentials.authorizationHeader,
-      );
-    }
-    request.add(body.takeBytes());
-
-    final response = await request.close();
-    if (response.statusCode == 401) {
-      await response.drain<void>();
-      throw AuthenticationRequired(
-        base,
-        realm: realmOf(response),
-        wereRejected: credentials != null,
-      );
-    }
-    if (response.statusCode != 200) {
-      throw HttpException(
-        'the server answered ${response.statusCode} for the pack',
-        uri: request.uri,
-      );
-    }
-
-    final pack = _readPackResponse(
-      await _collect(response),
-      usedSideBand: agreed.contains('side-band-64k'),
-      onProgress: onProgress,
-    );
-
-    final objects = PackParser(pack).parse();
-    objects.forEach((id, object) {
-      repository.objects.write(GitObject.parse(object.kind, object.content));
-    });
-
-    return FetchResult(
-      updates: _applyRefspecs(repository, remote, advertised),
-      objectsReceived: objects.length,
-      advertised: advertised,
+    return await _fetchHttpV0(
+      repository,
+      remote,
+      advertisement,
+      post,
+      onProgress,
     );
   } finally {
     client.close(force: true);
   }
 }
 
+/// Version 0 over HTTP, with the negotiation re-sent whole each round.
+///
+/// The server keeps nothing between requests, so every round repeats the wants
+/// and every `have` said so far. That is wasteful and it is what makes smart
+/// HTTP work through any proxy that understands nothing but requests and
+/// responses.
+Future<FetchResult> _fetchHttpV0(
+  Repository repository,
+  Remote remote,
+  Uint8List advertisement,
+  Future<HttpClientResponse> Function(List<int>) post,
+  void Function(String)? onProgress,
+) async {
+  final parsed = _readAdvertisement(advertisement);
+  final advertised = parsed.refs;
+  final capabilities = parsed.capabilities;
+
+  final wants = _wantsFor(repository, remote, advertised);
+  if (wants.isEmpty) {
+    return FetchResult(
+      updates: _applyRefspecs(repository, remote, advertised),
+      objectsReceived: 0,
+      advertised: advertised,
+      defaultBranch: parsed.symrefHead,
+    );
+  }
+
+  final sideBand = capabilities.contains('side-band-64k');
+  final agreed = <String>[
+    if (sideBand) 'side-band-64k',
+    if (capabilities.contains('ofs-delta')) 'ofs-delta',
+    if (capabilities.contains('multi_ack_detailed')) 'multi_ack_detailed',
+    'agent=$_agent',
+  ];
+  final canNegotiate = capabilities.contains('multi_ack_detailed') ||
+      capabilities.contains('multi_ack');
+
+  Uint8List requestFor(List<ObjectId> haves, {required bool done}) {
+    final body = BytesBuilder();
+    for (var i = 0; i < wants.length; i++) {
+      body.add(PktLine.text(
+        i == 0
+            ? 'want ${wants[i].hex} ${agreed.join(' ')}\n'
+            : 'want ${wants[i].hex}\n',
+      ).encode());
+    }
+    body.add(PktLine.flush.encode());
+    for (final have in haves) {
+      body.add(PktLine.text('have ${have.hex}\n').encode());
+    }
+    if (done) {
+      body.add(PktLine.text('done\n').encode());
+    } else {
+      body.add(PktLine.flush.encode());
+    }
+    return body.takeBytes();
+  }
+
+  // ---- negotiation ----
+  final negotiator = Negotiator(repository);
+  final told = <ObjectId>[];
+  var rounds = 0;
+
+  if (canNegotiate) {
+    for (var round = 0; round < 16; round++) {
+      final batch = negotiator.nextRound();
+      if (batch.isEmpty) break;
+      told.addAll(batch);
+      rounds += 1;
+
+      onProgress?.call('negotiating (${told.length} offered)');
+      final response = await post(requestFor(told, done: false));
+      final reply = parseNegotiation(
+        _textPackets(await _collect(response)),
+      );
+
+      for (final id in reply.acknowledged) {
+        negotiator.markCommon(id);
+      }
+      // The server has enough to build a pack; more offers would only make
+      // the request longer.
+      if (reply.ready) break;
+      if (negotiator.isExhausted) break;
+    }
+  } else {
+    // No multi-ack: one shot, with a frontier rather than every ref tip.
+    told.addAll(negotiator.nextRound());
+  }
+
+  // ---- the pack ----
+  onProgress?.call('asking for ${wants.length} refs');
+  final response = await post(requestFor(told, done: true));
+
+  final received = await _receivePack(
+    repository,
+    response,
+    usedSideBand: sideBand,
+    onProgress: onProgress,
+  );
+
+  return FetchResult(
+    updates: _applyRefspecs(repository, remote, advertised),
+    objectsReceived: received,
+    advertised: advertised,
+    defaultBranch: parsed.symrefHead,
+    negotiationRounds: rounds,
+  );
+}
+
+/// Version 2 over HTTP: `ls-refs`, then `fetch`.
+Future<FetchResult> _fetchHttpV2(
+  Repository repository,
+  Remote remote,
+  V2Capabilities capabilities,
+  Future<HttpClientResponse> Function(List<int>) post,
+  void Function(String)? onProgress,
+) async {
+  onProgress?.call('protocol version 2');
+
+  // Only the refs this remote's refspecs could possibly use. On a repository
+  // with very many refs this is the whole point of version 2.
+  final prefixes = _prefixesFor(remote);
+  final listed = parseLsRefs(
+    await _collect(await post(lsRefsRequest(prefixes: prefixes))),
+  );
+  final advertised = listed.refs;
+
+  final wants = _wantsFor(repository, remote, advertised);
+  if (wants.isEmpty) {
+    return FetchResult(
+      updates: _applyRefspecs(repository, remote, advertised),
+      objectsReceived: 0,
+      advertised: advertised,
+      defaultBranch: listed.defaultBranch,
+      protocolVersion: 2,
+    );
+  }
+
+  final negotiator = Negotiator(repository);
+  final told = <ObjectId>[];
+  var rounds = 0;
+
+  if (capabilities.canNegotiate) {
+    for (var round = 0; round < 16; round++) {
+      final batch = negotiator.nextRound();
+      if (batch.isEmpty) break;
+      told.addAll(batch);
+      rounds += 1;
+
+      onProgress?.call('negotiating (${told.length} offered)');
+      final body = await _collect(await post(fetchRequest(
+        wants: wants,
+        haves: told,
+        done: false,
+      )));
+
+      final reply = parseNegotiation(_textPackets(body));
+      for (final id in reply.acknowledged) {
+        negotiator.markCommon(id);
+      }
+      if (reply.ready) break;
+      if (negotiator.isExhausted) break;
+    }
+  }
+
+  onProgress?.call('asking for ${wants.length} refs');
+  final response = await post(fetchRequest(
+    wants: wants,
+    haves: told,
+    done: true,
+  ));
+
+  final received = await _receivePack(
+    repository,
+    response,
+    usedSideBand: true,
+    version2: true,
+    onProgress: onProgress,
+  );
+
+  return FetchResult(
+    updates: _applyRefspecs(repository, remote, advertised),
+    objectsReceived: received,
+    advertised: advertised,
+    defaultBranch: listed.defaultBranch,
+    protocolVersion: 2,
+    negotiationRounds: rounds,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ssh and the git daemon
+// ---------------------------------------------------------------------------
+
+/// One open connection, so the negotiation is a conversation rather than a
+/// series of restatements.
+Future<FetchResult> _fetchOverConnection(
+  Repository repository,
+  Remote remote,
+  PacketConnection connection,
+  void Function(String)? onProgress,
+  bool allowVersion2,
+) async {
+  try {
+    // ---- what the server opened with ----
+    final opening = <PktLine>[];
+    while (true) {
+      final packet = await connection.receive();
+      if (packet == null || packet.kind != PktKind.data) break;
+      opening.add(packet);
+    }
+    if (opening.isEmpty) {
+      throw StateError(
+        'the server said nothing. '
+        '${connection is SshConnection && connection.diagnostics.isNotEmpty
+            ? connection.diagnostics
+            : 'It may not have a repository at that path.'}',
+      );
+    }
+
+    final rejoined = BytesBuilder();
+    for (final packet in opening) {
+      rejoined.add(packet.encode());
+    }
+    rejoined.add(PktLine.flush.encode());
+    final advertisement = rejoined.takeBytes();
+
+    final v2 = allowVersion2
+        ? readV2Capabilities(advertisement)
+        : const V2Capabilities({});
+
+    // Awaited, not returned: the connection is closed in the `finally` below.
+    if (v2.supportsFetch) {
+      return await _fetchConnectionV2(
+        repository,
+        remote,
+        connection,
+        v2,
+        onProgress,
+      );
+    }
+    return await _fetchConnectionV0(
+      repository,
+      remote,
+      connection,
+      advertisement,
+      onProgress,
+    );
+  } finally {
+    await connection.close();
+  }
+}
+
+Future<FetchResult> _fetchConnectionV0(
+  Repository repository,
+  Remote remote,
+  PacketConnection connection,
+  Uint8List advertisement,
+  void Function(String)? onProgress,
+) async {
+  final parsed = _readAdvertisement(advertisement);
+  final advertised = parsed.refs;
+  final capabilities = parsed.capabilities;
+
+  final wants = _wantsFor(repository, remote, advertised);
+  if (wants.isEmpty) {
+    // Nothing to ask for: the server is told so rather than left waiting.
+    connection.send(PktLine.flush.encode());
+    await connection.flush();
+    return FetchResult(
+      updates: _applyRefspecs(repository, remote, advertised),
+      objectsReceived: 0,
+      advertised: advertised,
+      defaultBranch: parsed.symrefHead,
+    );
+  }
+
+  final sideBand = capabilities.contains('side-band-64k');
+  final agreed = <String>[
+    if (sideBand) 'side-band-64k',
+    if (capabilities.contains('ofs-delta')) 'ofs-delta',
+    if (capabilities.contains('multi_ack_detailed')) 'multi_ack_detailed',
+    'agent=$_agent',
+  ];
+
+  for (var i = 0; i < wants.length; i++) {
+    connection.send(PktLine.text(
+      i == 0
+          ? 'want ${wants[i].hex} ${agreed.join(' ')}\n'
+          : 'want ${wants[i].hex}\n',
+    ).encode());
+  }
+  connection.send(PktLine.flush.encode());
+  await connection.flush();
+
+  // ---- negotiation, as a conversation ----
+  final negotiator = Negotiator(repository);
+  final canNegotiate = capabilities.contains('multi_ack_detailed') ||
+      capabilities.contains('multi_ack');
+  var rounds = 0;
+
+  if (canNegotiate) {
+    for (var round = 0; round < 16; round++) {
+      final batch = negotiator.nextRound();
+      if (batch.isEmpty) break;
+      rounds += 1;
+
+      for (final have in batch) {
+        connection.send(PktLine.text('have ${have.hex}\n').encode());
+      }
+      connection.send(PktLine.flush.encode());
+      await connection.flush();
+      onProgress?.call('negotiating (round $rounds)');
+
+      final lines = <String>[];
+      while (true) {
+        final packet = await connection.receive();
+        if (packet == null || packet.kind != PktKind.data) break;
+        lines.add(packet.text);
+      }
+
+      final reply = parseNegotiation(lines);
+      for (final id in reply.acknowledged) {
+        negotiator.markCommon(id);
+      }
+      if (reply.ready) break;
+      if (negotiator.isExhausted) break;
+    }
+  } else {
+    for (final have in negotiator.nextRound()) {
+      connection.send(PktLine.text('have ${have.hex}\n').encode());
+    }
+  }
+
+  connection.send(PktLine.text('done\n').encode());
+
+  // Without side-band there is no framing around the pack and no flush after
+  // it, so the only end is the server hanging up — which is what the rest of
+  // the stream means there, and only there.
+  final received = sideBand
+      ? await _receivePack(
+          repository,
+          _packPacketsFrom(connection, version2: false, onProgress: onProgress),
+          usedSideBand: true,
+          framed: false,
+          onProgress: onProgress,
+        )
+      : await _receivePack(
+          repository,
+          connection.remaining,
+          usedSideBand: false,
+          onProgress: onProgress,
+        );
+
+  return FetchResult(
+    updates: _applyRefspecs(repository, remote, advertised),
+    objectsReceived: received,
+    advertised: advertised,
+    defaultBranch: parsed.symrefHead,
+    negotiationRounds: rounds,
+  );
+}
+
+Future<FetchResult> _fetchConnectionV2(
+  Repository repository,
+  Remote remote,
+  PacketConnection connection,
+  V2Capabilities capabilities,
+  void Function(String)? onProgress,
+) async {
+  onProgress?.call('protocol version 2');
+
+  connection.send(lsRefsRequest(prefixes: _prefixesFor(remote)));
+  await connection.flush();
+
+  final listing = BytesBuilder();
+  while (true) {
+    final packet = await connection.receive();
+    if (packet == null || packet.kind != PktKind.data) break;
+    listing.add(packet.encode());
+  }
+  final listed = parseLsRefs(listing.takeBytes());
+  final advertised = listed.refs;
+
+  final wants = _wantsFor(repository, remote, advertised);
+  if (wants.isEmpty) {
+    return FetchResult(
+      updates: _applyRefspecs(repository, remote, advertised),
+      objectsReceived: 0,
+      advertised: advertised,
+      defaultBranch: listed.defaultBranch,
+      protocolVersion: 2,
+    );
+  }
+
+  // Version 2 over one connection still repeats the wants each round, because
+  // each `fetch` command is self-contained — the command boundary is what
+  // replaced the stateful conversation.
+  final negotiator = Negotiator(repository);
+  final told = <ObjectId>[];
+  var rounds = 0;
+
+  if (capabilities.canNegotiate) {
+    for (var round = 0; round < 16; round++) {
+      final batch = negotiator.nextRound();
+      if (batch.isEmpty) break;
+      told.addAll(batch);
+      rounds += 1;
+
+      connection.send(fetchRequest(
+        wants: wants,
+        haves: told,
+        done: false,
+      ));
+      await connection.flush();
+
+      final lines = <String>[];
+      var sawSection = false;
+      while (true) {
+        final packet = await connection.receive();
+        if (packet == null || packet.kind != PktKind.data) break;
+        final text = packet.text.trim();
+        if (!sawSection && sectionNamed(text) != V2Section.unknown) {
+          sawSection = true;
+          continue;
+        }
+        lines.add(text);
+      }
+
+      final reply = parseNegotiation(lines);
+      for (final id in reply.acknowledged) {
+        negotiator.markCommon(id);
+      }
+      if (reply.ready) break;
+      if (negotiator.isExhausted) break;
+    }
+  }
+
+  onProgress?.call('asking for ${wants.length} refs');
+  connection.send(fetchRequest(wants: wants, haves: told, done: true));
+  await connection.flush();
+
+  final received = await _receivePack(
+    repository,
+    _packPacketsFrom(connection, version2: true, onProgress: onProgress),
+    usedSideBand: true,
+    framed: false,
+    onProgress: onProgress,
+  );
+
+  return FetchResult(
+    updates: _applyRefspecs(repository, remote, advertised),
+    objectsReceived: received,
+    advertised: advertised,
+    defaultBranch: listed.defaultBranch,
+    protocolVersion: 2,
+    negotiationRounds: rounds,
+  );
+}
+
+/// The packfile, out of the packets the server is still sending.
+///
+/// Reading "the rest of the stream" would be simpler and does not work here: a
+/// socket or a pipe does not end when the server has finished speaking, only
+/// when it hangs up, and it hangs up when *we* do. Waiting for the end of the
+/// stream is therefore waiting for something that will not happen until we
+/// stop waiting — which looks exactly like a network that has gone away. Over
+/// HTTP the response ends by itself, which is why the same code was fine
+/// there and hung here.
+///
+/// The pack is delivered as side-band packets and terminated by a flush, so
+/// the flush is the thing to stop on.
+Stream<List<int>> _packPacketsFrom(
+  PacketConnection connection, {
+  required bool version2,
+  void Function(String)? onProgress,
+}) async* {
+  var inPack = !version2;
+
+  while (true) {
+    final packet = await connection.receive();
+    if (packet == null) return;
+
+    if (packet.kind == PktKind.flush) {
+      // The flush that ends the pack, or one of the flushes that ends the
+      // acknowledgements before it.
+      if (inPack) return;
+      continue;
+    }
+    if (packet.kind != PktKind.data) continue;
+
+    if (version2 && !inPack) {
+      // Version 2 names its sections, so the pack begins where it says it
+      // does rather than wherever the acknowledgements happen to stop.
+      if (sectionNamed(packet.text.trim()) == V2Section.packfile) {
+        inPack = true;
+      }
+      continue;
+    }
+
+    if (packet.payload.isEmpty) continue;
+    final band = packet.payload.first;
+    final rest = Uint8List.sublistView(packet.payload, 1);
+
+    switch (band) {
+      case 1:
+        yield rest;
+      case 2:
+        final message = utf8.decode(rest, allowMalformed: true).trim();
+        if (message.isNotEmpty) onProgress?.call(message);
+      case 3:
+        throw StateError(
+          'the server reported: ${utf8.decode(rest, allowMalformed: true)}',
+        );
+      default:
+        // Before the pack, version 0 sends NAK and ACK unbanded.
+        final text = utf8.decode(packet.payload, allowMalformed: true);
+        if (!text.startsWith('NAK') && !text.startsWith('ACK')) {
+          throw FormatException('unknown side band $band');
+        }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// shared
+// ---------------------------------------------------------------------------
+
+/// The ref prefixes this remote's refspecs could match, for `ls-refs`.
+List<String> _prefixesFor(Remote remote) {
+  final prefixes = <String>{};
+  for (final spec in remote.effectiveFetchSpecs) {
+    final source = spec.source;
+    prefixes.add(source.endsWith('*')
+        ? source.substring(0, source.length - 1)
+        : source);
+  }
+  // Tags are wanted even when no refspec names them, because a fetch brings
+  // the tags that point into what it fetched.
+  prefixes.add('refs/tags/');
+  // And HEAD, which is not under `refs/` and so is matched by no prefix that
+  // starts with it. Without asking for it explicitly the server never mentions
+  // it, and `symrefs` has nothing to report — so a clone cannot learn which
+  // branch to check out, which is the one thing version 2 was meant to make
+  // askable.
+  prefixes.add('HEAD');
+  return prefixes.toList()..sort();
+}
+
+/// What to ask the server for: advertised refs this remote tracks and this
+/// repository does not already have.
+List<ObjectId> _wantsFor(
+  Repository repository,
+  Remote remote,
+  Map<String, ObjectId> advertised,
+) {
+  final wants = <ObjectId>[];
+  for (final entry in advertised.entries) {
+    if (remote.trackingRefFor(entry.key) == null) continue;
+    if (repository.objects.contains(entry.value)) continue;
+    if (!wants.contains(entry.value)) wants.add(entry.value);
+  }
+  return wants;
+}
+
+/// Streams the packfile to disk, indexes it, and stores it.
+///
+/// [framed] says whether [response] is still a pkt-line stream that has to be
+/// unwrapped, as an HTTP response body is, or the pack bytes themselves, as
+/// [_packPacketsFrom] has already produced.
+Future<int> _receivePack(
+  Repository repository,
+  Stream<List<int>> response, {
+  required bool usedSideBand,
+  bool version2 = false,
+  bool framed = true,
+  void Function(String)? onProgress,
+}) async {
+  // Written to disk as it arrives rather than assembled in memory. The
+  // response is the size of what is being cloned, and holding it whole — then
+  // the pack it contains, then every object inflated out of that — is three
+  // copies of a repository at once.
+  final temporary = File(p.join(
+    repository.gitDirectory,
+    'objects',
+    'pack',
+    'incoming-$pid.pack',
+  ))
+    ..parent.createSync(recursive: true);
+
+  final received = framed
+      ? await _streamPackTo(
+          temporary,
+          response,
+          usedSideBand: usedSideBand,
+          version2: version2,
+          onProgress: onProgress,
+        )
+      : await _writeStreamTo(temporary, response);
+
+  try {
+    if (received == 0) return 0;
+
+    onProgress?.call('indexing');
+    final indexed = PackIndexer(temporary.path).run();
+
+    if (indexed.count <= unpackLimit) {
+      // A handful of objects are cheaper to read loose than through an index,
+      // and a pack of three objects is mostly header.
+      final objects = PackParser(temporary.readAsBytesSync()).parse();
+      objects.forEach((id, object) {
+        repository.objects.write(GitObject.parse(object.kind, object.content));
+      });
+    } else {
+      repository.objects.writePackFile(
+        packPath: temporary.path,
+        objects: indexed.objects,
+        packChecksum: indexed.checksum,
+      );
+    }
+    return indexed.count;
+  } finally {
+    if (temporary.existsSync()) temporary.deleteSync();
+  }
+}
+
+/// Writes a stream of pack bytes straight to a file.
+Future<int> _writeStreamTo(File file, Stream<List<int>> bytes) async {
+  final sink = file.openWrite();
+  var written = 0;
+  try {
+    await for (final chunk in bytes) {
+      sink.add(chunk);
+      written += chunk.length;
+    }
+  } finally {
+    await sink.close();
+  }
+  return written;
+}
+
+/// Collects a whole response into memory.
+///
+/// Used for advertisements and negotiation replies, which are lists of names
+/// read all at once. The pack is not read this way — see [_streamPackTo].
 Future<Uint8List> _collect(Stream<List<int>> stream) async {
   final builder = BytesBuilder();
   await for (final chunk in stream) {
@@ -313,14 +1008,101 @@ Future<Uint8List> _collect(Stream<List<int>> stream) async {
   return builder.takeBytes();
 }
 
+/// The text of every data packet in [bytes].
+List<String> _textPackets(Uint8List bytes) {
+  final reader = PktLineReader(bytes);
+  final lines = <String>[];
+  while (true) {
+    final packet = reader.next();
+    if (packet == null) break;
+    if (packet.kind == PktKind.data) lines.add(packet.text);
+  }
+  return lines;
+}
+
+/// Writes the packfile out of a side-banded response into [file] as the bytes
+/// arrive, and returns how many pack bytes were written.
+///
+/// With side-band-64k the pack comes in pkt-lines whose first byte says which
+/// band it is: 1 is the pack, 2 is progress for a person, 3 is an error.
+Future<int> _streamPackTo(
+  File file,
+  Stream<List<int>> response, {
+  required bool usedSideBand,
+  bool version2 = false,
+  void Function(String)? onProgress,
+}) async {
+  final reader = PktLineStreamReader();
+  final sink = file.openWrite();
+  var written = 0;
+  var inPack = !version2;
+
+  try {
+    await for (final chunk in response) {
+      for (final packet in reader.add(chunk)) {
+        if (packet.kind != PktKind.data) continue;
+
+        if (version2 && !inPack) {
+          // Version 2 names its sections, so the pack begins where it says it
+          // does rather than wherever the acknowledgements stop.
+          final text = packet.text.trim();
+          if (sectionNamed(text) == V2Section.packfile) {
+            inPack = true;
+          }
+          continue;
+        }
+
+        if (!usedSideBand) {
+          final text = packet.text;
+          // Acknowledgements come before the pack and are not part of it.
+          if (text.startsWith('NAK') || text.startsWith('ACK')) continue;
+          sink.add(packet.payload);
+          written += packet.payload.length;
+          continue;
+        }
+
+        if (packet.payload.isEmpty) continue;
+        final band = packet.payload.first;
+        final rest = Uint8List.sublistView(packet.payload, 1);
+
+        switch (band) {
+          case 1:
+            sink.add(rest);
+            written += rest.length;
+          case 2:
+            final message = utf8.decode(rest, allowMalformed: true).trim();
+            if (message.isNotEmpty) onProgress?.call(message);
+          case 3:
+            throw StateError(
+              'the server reported: ${utf8.decode(rest, allowMalformed: true)}',
+            );
+          default:
+            // Before the pack, the server sends NAK/ACK unbanded.
+            final text = utf8.decode(packet.payload, allowMalformed: true);
+            if (!text.startsWith('NAK') && !text.startsWith('ACK')) {
+              throw FormatException('unknown side band $band');
+            }
+        }
+      }
+    }
+  } finally {
+    await sink.close();
+  }
+
+  return written;
+}
+
 /// Reads `# service=…`, then the ref lines, then the capabilities that came
 /// after the NUL on the first of them (`transfer.advertisement`).
-({Map<String, ObjectId> refs, Set<String> capabilities}) _readAdvertisement(
-  Uint8List bytes,
-) {
+({
+  Map<String, ObjectId> refs,
+  Set<String> capabilities,
+  String? symrefHead,
+}) _readAdvertisement(Uint8List bytes) {
   final reader = PktLineReader(bytes);
   final refs = <String, ObjectId>{};
   final capabilities = <String>{};
+  String? symrefHead;
 
   var first = true;
   while (true) {
@@ -334,6 +1116,13 @@ Future<Uint8List> _collect(Stream<List<int>> stream) async {
     final line = parseAdvertisement(packet);
     if (first) {
       capabilities.addAll(line.capabilities);
+      // `symref=HEAD:refs/heads/main` is how version 0 says which branch is
+      // the default — a capability rather than a question a client can ask,
+      // which is one of the things version 2 exists to fix.
+      for (final capability in line.capabilities) {
+        if (!capability.startsWith('symref=HEAD:')) continue;
+        symrefHead = capability.substring('symref=HEAD:'.length);
+      }
       first = false;
     }
     // A peeled tag is advertised as `refs/tags/x^{}`; the tag object itself is
@@ -343,61 +1132,8 @@ Future<Uint8List> _collect(Stream<List<int>> stream) async {
     refs[line.path] = ObjectId.fromHex(line.name);
   }
 
-  return (refs: refs, capabilities: capabilities);
+  return (refs: refs, capabilities: capabilities, symrefHead: symrefHead);
 }
-
-/// Pulls the packfile out of the response.
-///
-/// With side-band-64k the pack arrives in pkt-lines whose first byte says
-/// which band it is: 1 is the pack, 2 is progress for a human, 3 is an error.
-Uint8List _readPackResponse(
-  Uint8List bytes, {
-  required bool usedSideBand,
-  void Function(String)? onProgress,
-}) {
-  final reader = PktLineReader(bytes);
-  final pack = BytesBuilder();
-
-  while (true) {
-    final packet = reader.next();
-    if (packet == null) break;
-    if (packet.kind != PktKind.data) continue;
-
-    if (!usedSideBand) {
-      final text = packet.text;
-      // Acknowledgements come before the pack and are not part of it.
-      if (text.startsWith('NAK') || text.startsWith('ACK')) continue;
-      pack.add(packet.payload);
-      continue;
-    }
-
-    if (packet.payload.isEmpty) continue;
-    final band = packet.payload.first;
-    final rest = Uint8List.sublistView(packet.payload, 1);
-
-    switch (band) {
-      case 1:
-        pack.add(rest);
-      case 2:
-        final message = utf8.decode(rest, allowMalformed: true).trim();
-        if (message.isNotEmpty) onProgress?.call(message);
-      case 3:
-        throw StateError(
-          'the server reported: ${utf8.decode(rest, allowMalformed: true)}',
-        );
-      default:
-        // Before the pack, the server sends NAK/ACK unbanded.
-        final text = utf8.decode(packet.payload, allowMalformed: true);
-        if (!text.startsWith('NAK') && !text.startsWith('ACK')) {
-          throw FormatException('unknown side band $band');
-        }
-    }
-  }
-
-  return pack.takeBytes();
-}
-
-// ---------------------------------------------------------------------------
 
 /// Moves the tracking refs the remote's refspecs name.
 List<RefUpdate> _applyRefspecs(
@@ -416,7 +1152,12 @@ List<RefUpdate> _applyRefspecs(
 
     final before = repository.refs.resolve(local);
     if (before != entry.value) {
-      repository.refs.write(local, entry.value);
+      repository.refs.write(
+        local,
+        entry.value,
+        reflogMessage: 'fetch ${remote.name}: '
+            '${before == null ? 'storing head' : 'fast-forward'}',
+      );
     }
     updates.add(RefUpdate(ref: local, from: before, to: entry.value));
   }
