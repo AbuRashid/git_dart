@@ -1,0 +1,17 @@
+# Nearly every test here is an integration test: it builds a real repository
+# by running git, then checks what this library did against what git says.
+# Building a fifty-commit history means spawning git a hundred times, and on
+# Windows a process launch is not cheap — so the default thirty seconds per
+# test is exceeded by the fixture alone, before anything is asserted.
+#
+# The failure that prompted this was not a slow library call. It was a test
+# timing out mid-fetch, which tore down the HTTP server the test was talking
+# to and reported "connection closed before full header" — a symptom three
+# steps removed from the cause, and one that only appeared when the suite ran
+# in parallel and everything was competing for the CPU.
+timeout: 5m
+
+# The suite is mostly waiting on subprocesses rather than computing, so more
+# concurrency than cores is the right shape. Past this the git invocations
+# start contending and every test gets slower.
+concurrency: 4

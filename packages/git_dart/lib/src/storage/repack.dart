@@ -286,6 +286,16 @@ RepackResult repack(
   // Empty fan-out directories left behind by the loose objects that went.
   _pruneEmptyFanout(repository.objects.loose.objectsDirectory);
 
+  // The commit-graph is a cache of the history's shape, and a repack is when
+  // reading that history has just become cheapest to cache and most expensive
+  // to leave stale. Failing to write it is not a reason to fail the repack:
+  // everything works without one.
+  try {
+    repository.writeCommitGraph();
+  } catch (_) {
+    // A cache that could not be written is a cache that is not there.
+  }
+
   return RepackResult(
     packed: built.objects.length,
     looseRemoved: looseRemoved,

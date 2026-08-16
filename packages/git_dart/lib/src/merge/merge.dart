@@ -5,9 +5,9 @@ import 'dart:typed_data';
 import 'package:path/path.dart' as p;
 
 import '../diff/text_diff.dart';
+import '../graph/graph_walks.dart';
 import '../index/git_index.dart';
 import '../object_id.dart';
-import '../objects/commit.dart';
 import '../objects/git_object.dart';
 import '../objects/identity.dart';
 import '../objects/tree.dart';
@@ -70,16 +70,17 @@ List<ObjectId> mergeBasesOf(
   Iterable<ObjectId> a,
   Iterable<ObjectId> b,
 ) {
+  final reader = GraphReader(repository);
+
   Set<ObjectId> ancestorsOf(Iterable<ObjectId> from) {
     final seen = <ObjectId>{};
     final pending = <ObjectId>[...from];
     while (pending.isNotEmpty) {
       final id = pending.removeLast();
       if (!seen.add(id)) continue;
-      final raw = repository.objects.readRaw(id);
-      if (raw == null) continue;
-      final object = GitObject.parse(raw.kind, raw.content);
-      if (object is Commit) pending.addAll(object.parents);
+      final node = reader[id];
+      if (node == null) continue;
+      pending.addAll(node.parents);
     }
     return seen;
   }
@@ -92,22 +93,40 @@ List<ObjectId> mergeBasesOf(
   // A best common ancestor is one no other common ancestor can reach: the
   // maximal elements. Anything reachable from another common ancestor is
   // further back and would make a worse base.
+  //
+  // The walk from each candidate stops at the shallowest generation among the
+  // others: nothing below that level can be one of them, so there is no
+  // reason to keep descending. Without a commit-graph there are no
+  // generations, the floor is absent and the walk runs to the roots as it
+  // always did — the same answer, more slowly.
+  var floor = -1;
+  for (final id in common) {
+    final generation = reader[id]?.generation;
+    if (generation == null) {
+      floor = -1;
+      break;
+    }
+    if (floor < 0 || generation < floor) floor = generation;
+  }
+
   final reachableFromOtherCommon = <ObjectId>{};
   for (final id in common) {
-    final raw = repository.objects.readRaw(id);
-    if (raw == null) continue;
-    final object = GitObject.parse(raw.kind, raw.content);
-    if (object is! Commit) continue;
-    final pending = <ObjectId>[...object.parents];
+    final node = reader[id];
+    if (node == null) continue;
+    final pending = <ObjectId>[...node.parents];
     final seen = <ObjectId>{};
     while (pending.isNotEmpty) {
       final ancestor = pending.removeLast();
       if (!seen.add(ancestor)) continue;
       if (common.contains(ancestor)) reachableFromOtherCommon.add(ancestor);
-      final parentRaw = repository.objects.readRaw(ancestor);
-      if (parentRaw == null) continue;
-      final parent = GitObject.parse(parentRaw.kind, parentRaw.content);
-      if (parent is Commit) pending.addAll(parent.parents);
+      final parent = reader[ancestor];
+      if (parent == null) continue;
+      if (floor >= 0 &&
+          parent.generation != null &&
+          parent.generation! < floor) {
+        continue;
+      }
+      pending.addAll(parent.parents);
     }
   }
 

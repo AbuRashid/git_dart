@@ -14,6 +14,8 @@ export 'src/config/config_writer.dart';
 export 'src/config/git_config.dart';
 export 'src/diff/text_diff.dart';
 export 'src/diff/tree_diff.dart';
+export 'src/graph/commit_graph.dart';
+export 'src/graph/graph_walks.dart';
 export 'src/index/git_index.dart';
 export 'src/merge/cherry_pick.dart';
 export 'src/merge/merge.dart';

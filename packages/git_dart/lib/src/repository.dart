@@ -8,6 +8,8 @@ import 'package:path/path.dart' as p;
 import 'config/git_config.dart';
 import 'diff/text_diff.dart';
 import 'diff/tree_diff.dart';
+import 'graph/commit_graph.dart';
+import 'graph/graph_walks.dart';
 import 'index/git_index.dart';
 import 'object_id.dart';
 import 'objects/commit.dart';
@@ -123,6 +125,26 @@ class Repository {
   void reloadConfig() {
     _config = null;
     _attributes = null;
+  }
+
+  CommitGraph? _commitGraph;
+  var _lookedForCommitGraph = false;
+
+  /// The commit-graph cache, or null when the repository has none.
+  ///
+  /// Optional by design: every question it speeds up is answered the same way
+  /// without it. Read once and kept, because it is consulted per commit during
+  /// a walk and re-reading the header each time would cost more than it saves.
+  CommitGraph? get commitGraph {
+    if (_lookedForCommitGraph) return _commitGraph;
+    _lookedForCommitGraph = true;
+    return _commitGraph = CommitGraph.open(gitDirectory);
+  }
+
+  /// Forgets the cached commit-graph, for a caller that has just written one.
+  void reloadCommitGraph() {
+    _lookedForCommitGraph = false;
+    _commitGraph = null;
   }
 
   Attributes? _attributes;
@@ -686,18 +708,21 @@ class Repository {
   /// caller can say "not counted" rather than freeze.
   ///
   /// Two cleverer versions were written first and both disagreed with git.
-  /// Walking newest-first and stopping when the frontier looks shared is what
-  /// git does, and it leans on commit dates: histories whose commits share a
-  /// timestamp — anything scripted, imported or rebased in a hurry — order
-  /// arbitrarily and the walk stops too early. Pruning at shared commits
-  /// instead is sound in principle but needs to know a commit is shared
-  /// before walking past it, which is the same question again.
+  /// Walking newest-first and stopping when the frontier looks shared leans on
+  /// commit dates: histories whose commits share a timestamp — anything
+  /// scripted, imported or rebased in a hurry — order arbitrarily and the walk
+  /// stops too early. Collecting both full ancestries and subtracting is exact
+  /// and costs the size of the history.
   ///
-  /// Without generation numbers, which git keeps in a commit-graph file this
-  /// library does not read, there is no shortcut that is both exact and
-  /// cheap. Exact and bounded is the better trade for a number shown next to
-  /// a remote: a wrong count is worse than a slow one, and the result is
-  /// cached by the caller.
+  /// What settles it is a generation number, which orders commits by *shape*
+  /// rather than by clock: both frontiers are walked together, deepest first,
+  /// and the walk ends as soon as everything left is common to both. That is
+  /// exact whatever the dates say. With no commit-graph the same walk runs
+  /// without the pruning — the answer is identical and the cost is the old
+  /// one, which is why [limit] still exists.
+  ///
+  /// Null when either side has more than [limit] commits to look at, so a
+  /// caller can say "not counted" rather than freeze.
   AheadBehind? countAheadBehind(
     ObjectId ours,
     ObjectId theirs, {
@@ -705,6 +730,22 @@ class Repository {
   }) {
     if (ours == theirs) return const AheadBehind(0, 0);
 
+    // Without a graph the walk is unbounded, so the old ceiling still applies.
+    if (commitGraph == null) {
+      final counted = _countAheadBehindBounded(ours, theirs, limit);
+      if (counted != null) return counted;
+      return null;
+    }
+
+    final counted = countDivergence(this, ours, theirs);
+    return AheadBehind(counted.ahead, counted.behind);
+  }
+
+  AheadBehind? _countAheadBehindBounded(
+    ObjectId ours,
+    ObjectId theirs,
+    int limit,
+  ) {
     Set<ObjectId>? reachable(ObjectId from) {
       final seen = <ObjectId>{};
       final pending = <ObjectId>[from];
@@ -734,6 +775,90 @@ class Repository {
       if (!fromOurs.contains(id)) behind += 1;
     }
     return AheadBehind(ahead, behind);
+  }
+
+  /// Whether [ancestor] is reachable from [descendant] — `merge-base
+  /// --is-ancestor`.
+  ///
+  /// The question behind "is this branch merged", "can this push
+  /// fast-forward", and "is this tag on this branch". With a commit-graph the
+  /// generation numbers usually settle it without reading a commit at all.
+  bool isAncestorOf(ObjectId ancestor, ObjectId descendant) =>
+      isAncestor(this, ancestor, descendant);
+
+  /// Commits reachable from [start], parents always after their children.
+  ///
+  /// What `git log --topo-order` gives, and what [log] deliberately does not:
+  /// date order is what a listing usually wants and it can show a commit
+  /// before something it was built on.
+  Iterable<Commit> logTopological({ObjectId? start, int? limit}) sync* {
+    final from = start ?? headId;
+    if (from == null) return;
+    final head = peel(from);
+    if (head is! Commit) return;
+
+    for (final id in topologicalOrder(this, head.id, limit: limit)) {
+      final raw = objects.readRaw(id);
+      if (raw == null) continue;
+      yield objects.readTyped<Commit>(id);
+    }
+  }
+
+  /// Writes a commit-graph covering everything reachable from the refs.
+  ///
+  /// Purely a cache: nothing depends on it existing, and a stale one is
+  /// replaced rather than repaired. Worth writing after a fetch or a repack,
+  /// which is when the shape of the history has changed most.
+  int writeCommitGraph() {
+    final commits = <CommitGraphInput>[];
+    final seen = <ObjectId>{};
+
+    final roots = <ObjectId>[];
+    for (final ref in refs.list()) {
+      final id = refs.resolve(ref.path);
+      if (id != null) roots.add(id);
+    }
+    final head = headId;
+    if (head != null) roots.add(head);
+
+    final pending = <ObjectId>[...roots];
+    while (pending.isNotEmpty) {
+      final id = pending.removeLast();
+      if (!seen.add(id)) continue;
+      final raw = objects.readRaw(id);
+      if (raw == null) continue;
+      final object = GitObject.parse(raw.kind, raw.content);
+      // A ref may name a tag or a tree; only commits belong in the graph.
+      if (object is Tag) {
+        pending.add(object.target);
+        continue;
+      }
+      if (object is! Commit) continue;
+
+      commits.add(CommitGraphInput(
+        id: id,
+        tree: object.tree,
+        parents: object.parents,
+        commitTime: object.committer.seconds,
+      ));
+      pending.addAll(object.parents);
+    }
+
+    if (commits.isEmpty) return 0;
+
+    final bytes = CommitGraphWriter.build(commits);
+    final directory = Directory(p.join(gitDirectory, 'objects', 'info'))
+      ..createSync(recursive: true);
+    final path = p.join(directory.path, 'commit-graph');
+
+    // The same lock-and-rename as everything else that must not be seen half
+    // written — and a half-written cache is worse than none, because a reader
+    // has no way to tell.
+    final temporary = File('$path.lock')..writeAsBytesSync(bytes, flush: true);
+    temporary.renameSync(path);
+
+    reloadCommitGraph();
+    return commits.length;
   }
 
   /// Where a branch stands against the ref it tracks.
