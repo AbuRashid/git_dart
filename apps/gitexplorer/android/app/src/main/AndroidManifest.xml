@@ -1,6 +1,18 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- A repository is a folder the user already has, holding files other apps
+         made. Scoped storage shows an app only the files it owns itself, so
+         without this the working tree looks empty: the folder lists, `.git` gets
+         written, and the user's own files are invisible. The media permissions
+         are no substitute — they cover images, video and audio, and a repository
+         is none of those. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- Before scoped storage, reading a shared folder was this instead. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+
     <application
-        android:label="gitexplorer"
+        android:label="Git Explorer"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

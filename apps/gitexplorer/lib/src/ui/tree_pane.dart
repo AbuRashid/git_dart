@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../generated/tokens.dart';
 import '../models.dart';
 import '../state.dart';
+import '../storage_access.dart';
 import '../theme.dart';
 
 /// The virtual root and everything opened under it.
@@ -111,6 +112,8 @@ class ThemeButton extends StatelessWidget {
 /// that, rather than being added as a row that can only report a failure
 /// (`initialising.why`).
 Future<void> addRepository(BuildContext context, ExplorerState state) async {
+  if (!await _ensureStorageAccess(context)) return;
+
   final picked = await FilePicker.getDirectoryPath(
     dialogTitle: 'Choose a repository',
   );
@@ -167,6 +170,63 @@ Future<void> addRepository(BuildContext context, ExplorerState state) async {
   );
 
   if (create ?? false) await state.initialiseRepository(picked);
+}
+
+/// Makes sure the app may read the files in whatever folder is picked next.
+///
+/// Asked before the picker rather than after, because the failure it prevents is
+/// a silent one: without access the folder still opens and `.git` is still
+/// written, and only the files — the whole point — are missing. Explaining that
+/// afterwards means explaining an empty list.
+Future<bool> _ensureStorageAccess(BuildContext context) async {
+  if (await hasStorageAccess()) return true;
+  if (!context.mounted) return false;
+
+  final ask = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Needs access to your files'),
+      content: const Text(
+        'A repository is a folder of files other apps made, and Android hides '
+        'those from this app until you allow it.\n\n'
+        'Without it a folder still opens, but it looks empty.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Not now'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Allow access'),
+        ),
+      ],
+    ),
+  );
+  if (!(ask ?? false)) return false;
+
+  if (await requestStorageAccess()) return true;
+  if (!context.mounted) return false;
+
+  // Refused, or granted-then-revoked on the way back. Say so once and stop,
+  // rather than reopening settings at someone who has just declined.
+  await showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Access not granted'),
+      content: const Text(
+        'Folders can still be opened, but their files will not be listed. '
+        'Adding a repository is available again once access is allowed.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+  return false;
 }
 
 class _EmptyRoot extends StatelessWidget {

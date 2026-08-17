@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "ms.ibrahim" "\0"
-            VALUE "FileDescription", "gitexplorer" "\0"
+            VALUE "FileDescription", "Git Explorer" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "gitexplorer" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 ms.ibrahim. All rights reserved." "\0"
             VALUE "OriginalFilename", "gitexplorer.exe" "\0"
-            VALUE "ProductName", "gitexplorer" "\0"
+            VALUE "ProductName", "Git Explorer" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
