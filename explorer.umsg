@@ -344,6 +344,29 @@ gitexplorer @apps/gitexplorer/v0 {
          designer. Material has resting sizes, a colour scheme with semantic
          roles and a type scale already; the application uses them."
 
+    material-used-rather-than-defaulted "Using Material is not the same as
+         accepting every default. Left alone, Material puts each surface on the
+         same colour and each row in a square, which reads as unfinished rather
+         than as restraint — the window looks like a form, not like a tool.
+
+         What the theme configures is Material's own components and roles: the
+         list and the detail sit on two of the surface-container roles rather
+         than one, a selected row wears the primary container it already
+         defines, and a tab bar is asked to group its tabs instead of spreading
+         them across a pane. No value here is invented; each is a Material
+         decision that has to be made one way or the other, made deliberately."
+
+    seed-colour "One colour is chosen — git's orange, the colour the icon is
+         drawn in — and Material derives the scheme from it. A seed is not a
+         palette: it is the single decision that makes the window recognisably
+         this application's rather than the default lilac.
+
+         The scheme is generated with the variant that keeps the colour in the
+         primary roles and leaves the surfaces neutral. The default mapping
+         spreads the seed's hue everywhere, and from a red-orange that comes out
+         pink: a tool wants grey to read on and the accent kept for whatever is
+         being pointed at."
+
     what-is-left-here "Only the theme choice, which is behaviour rather than
          appearance: whether the window follows the platform or is pinned to
          light or dark."

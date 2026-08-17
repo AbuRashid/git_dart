@@ -2,18 +2,70 @@ import 'package:flutter/material.dart';
 
 import 'generated/tokens.dart';
 
+/// The seed the whole scheme is generated from.
+///
+/// git's orange, which is also what the application's icon is drawn in. One
+/// colour rather than a palette: Material derives the roles, and the window
+/// ends up recognisably this application's without anything here deciding what
+/// "a surface" or "a container" should look like (`presentation.doc`).
+const _seed = Color(0xFFF05133);
+
 /// Stock Material, light and dark.
 ///
 /// No palette, no metrics, no type scale: Material has all three, and an
 /// application that redefines them has to maintain them and stops looking like
 /// everything else on the machine (`presentation.doc`).
-ThemeData explorerTheme(Brightness brightness) => ThemeData(
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: Colors.indigo,
-        brightness: brightness,
+///
+/// What is configured below is Material's own components, not new values. The
+/// defaults leave every surface the same colour and every row square, which
+/// reads as unfinished rather than as restraint; Material already has the
+/// container roles and the shapes for this, and this asks for them
+/// (`presentation.material-used-rather-than-defaulted`).
+ThemeData explorerTheme(Brightness brightness) {
+  final colors = ColorScheme.fromSeed(
+    seedColor: _seed,
+    brightness: brightness,
+    // Material's default mapping spreads the seed's hue across the surfaces
+    // too, which from a red-orange comes out pink and makes the window look
+    // like it belongs to something else entirely. This variant is the one that
+    // keeps a coloured primary over neutral surfaces, which is what a tool
+    // wants: grey to read on, the accent where something is being pointed at.
+    dynamicSchemeVariant: DynamicSchemeVariant.rainbow,
+  );
+
+  return ThemeData(
+    colorScheme: colors,
+    useMaterial3: true,
+    scaffoldBackgroundColor: colors.surface,
+    appBarTheme: AppBarTheme(
+      backgroundColor: colors.surfaceContainer,
+      // Says "the list scrolled under this" instead of drawing a line for it.
+      scrolledUnderElevation: 3,
+    ),
+    dividerTheme: DividerThemeData(
+      space: 1,
+      thickness: 1,
+      color: colors.outlineVariant,
+    ),
+    listTileTheme: ListTileThemeData(
+      // A selected row reads as one object when its highlight has an edge; the
+      // full-bleed default bar makes the tree look like a table instead.
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.all(Radius.circular(9)),
       ),
-      useMaterial3: true,
-    );
+      // The primary container, not the secondary one: this scheme keeps its
+      // colour in the primary roles and leaves the rest near-neutral, so a
+      // secondary highlight is invisible against a neutral sidebar.
+      selectedTileColor: colors.primaryContainer,
+      selectedColor: colors.onPrimaryContainer,
+    ),
+    tabBarTheme: const TabBarThemeData(
+      // Otherwise the indicator spans the whole tab and reads as a border.
+      indicatorSize: TabBarIndicatorSize.label,
+      dividerHeight: 0,
+    ),
+  );
+}
 
 /// The colour of a status letter.
 ///

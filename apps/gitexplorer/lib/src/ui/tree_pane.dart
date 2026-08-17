@@ -31,11 +31,17 @@ class TreePane extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
           child: Row(
             children: [
-              Text('Repositories', style: theme.textTheme.titleSmall),
+              Text(
+                'Repositories',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
               const Spacer(),
-              IconButton(
+              IconButton.filledTonal(
                 icon: const Icon(Icons.add),
                 tooltip: 'Add a repository',
+                visualDensity: VisualDensity.compact,
                 onPressed: () => addRepository(context, state),
               ),
             ],
@@ -305,11 +311,14 @@ class _RepositoryRow extends StatelessWidget {
         (state.selection as RepositorySelected).repositoryPath ==
             row.repositoryPath;
 
-    return _Contextual(
-      onMenu: (position) => _repositoryMenu(context, state, summary, position),
-      child: ListTile(
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: _Contextual(
+        onMenu: (position) => _repositoryMenu(context, state, summary, position),
+        child: ListTile(
         dense: true,
         selected: selected,
+        contentPadding: const EdgeInsets.only(left: 8, right: 8),
         leading: summary.available
             ? IconButton(
                 icon: Icon(expanded ? Icons.expand_more : Icons.chevron_right),
@@ -341,10 +350,11 @@ class _RepositoryRow extends StatelessWidget {
         trailing: summary.available && !summary.isClean
             ? _ChangeCounts(summary: summary)
             : null,
-        onTap: () {
-          state.selectRepository(row.repositoryPath);
-          onNavigate?.call();
-        },
+          onTap: () {
+            state.selectRepository(row.repositoryPath);
+            onNavigate?.call();
+          },
+        ),
       ),
     );
   }
@@ -397,8 +407,10 @@ class _EntryRow extends StatelessWidget {
     final unsaved = state.hasDraft(row.repositoryPath, entry.path);
     final color = statusColor(entry.state, context);
 
-    return _Contextual(
-      onMenu: state.revisionFor(row.repositoryPath).kind.editable
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: _Contextual(
+        onMenu: state.revisionFor(row.repositoryPath).kind.editable
           ? (position) => entry.kind == EntryKind.directory
               ? _directoryMenu(
                   context, state, row.repositoryPath, entry.path, position)
@@ -407,7 +419,7 @@ class _EntryRow extends StatelessWidget {
       child: ListTile(
         dense: true,
         selected: selected,
-        contentPadding: EdgeInsets.only(left: 16.0 * row.depth, right: 8),
+        contentPadding: EdgeInsets.only(left: 8 + 16.0 * row.depth, right: 8),
         // A folder shows a chevron for the same reason a repository does: it
         // is what says "this opens". Files are inset by the chevron's width so
         // their icons line up under the folders'.
@@ -473,6 +485,7 @@ class _EntryRow extends StatelessWidget {
             onNavigate?.call();
           }
         },
+        ),
       ),
     );
   }

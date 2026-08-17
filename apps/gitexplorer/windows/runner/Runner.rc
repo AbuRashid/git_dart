@@ -95,7 +95,11 @@ BEGIN
             VALUE "InternalName", "gitexplorer" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 ms.ibrahim. All rights reserved." "\0"
             VALUE "OriginalFilename", "gitexplorer.exe" "\0"
-            VALUE "ProductName", "Git Explorer" "\0"
+            // ProductName is a storage key on Windows, not a label:
+            // getApplicationSupportDirectory derives %APPDATA%\<company>\
+            // <product> from it, so changing it orphans the saved
+            // repository list. FileDescription carries the display name.
+            VALUE "ProductName", "gitexplorer" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

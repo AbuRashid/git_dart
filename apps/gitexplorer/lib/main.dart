@@ -103,9 +103,20 @@ class ExplorerPage extends StatelessWidget {
             body: wide
                 ? Row(
                     children: [
+                      // The list and what it opens are different kinds of
+                      // thing, so they sit on different Material containers
+                      // rather than relying on a divider to say so.
+                      //
+                      // A Material rather than a ColoredBox: rows paint their
+                      // highlight into the nearest Material, so a plain box
+                      // over the top would hide every selection in the tree.
                       SizedBox(
                         width: sidebarWidth,
-                        child: TreePane(state: state),
+                        child: Material(
+                          color:
+                              Theme.of(context).colorScheme.surfaceContainerLow,
+                          child: TreePane(state: state),
+                        ),
                       ),
                       const VerticalDivider(width: 1),
                       Expanded(child: DetailPane(state: state)),

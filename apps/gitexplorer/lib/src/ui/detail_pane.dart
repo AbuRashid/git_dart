@@ -186,6 +186,9 @@ class _RepositoryDetail extends StatelessWidget {
     final history = state.history;
 
     return Column(
+      // The facts and the tabs describe the repository named above them, so
+      // they start where its name starts rather than floating mid-pane.
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _Header(
           title: summary.name,
@@ -222,8 +225,14 @@ class _RepositoryDetail extends StatelessWidget {
           child: DefaultTabController(
             length: 4,
             child: Column(
+              // A scrollable tab bar shrinks to its tabs, so without this the
+              // column centres it and the tabs drift into the middle of the
+              // pane, away from the content they label.
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 TabBar(
+                  isScrollable: true,
+                  tabAlignment: TabAlignment.start,
                   tabs: [
                     const Tab(text: 'History'),
                     Tab(
@@ -314,6 +323,7 @@ class _Facts extends StatelessWidget {
       child: Wrap(
         spacing: 8,
         runSpacing: 8,
+        alignment: WrapAlignment.start,
         children: [
           Chip(
             avatar: const Icon(Icons.commit, size: 18),
@@ -325,13 +335,16 @@ class _Facts extends StatelessWidget {
           ),
           Chip(label: Text('${summary.changedCount} changed')),
           Chip(label: Text('${summary.untrackedCount} untracked')),
-          Chip(label: Text('${summary.branches.length} branches')),
-          Chip(label: Text('${summary.tags.length} tags')),
+          Chip(label: Text(_count(summary.branches.length, 'branch', 'branches'))),
+          Chip(label: Text(_count(summary.tags.length, 'tag', 'tags'))),
         ],
       ),
     );
   }
 }
+
+/// A count with the right noun for it.
+String _count(int n, String one, String many) => '$n ${n == 1 ? one : many}';
 
 class _Heading extends StatelessWidget {
   final String label;
