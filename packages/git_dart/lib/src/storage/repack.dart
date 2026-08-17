@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/git_object.dart';
@@ -97,7 +98,7 @@ Set<ObjectId> liveObjects(Repository repository) =>
     'REVERT_HEAD',
     'REBASE_HEAD',
   ]) {
-    final file = File(p.join(repository.gitDirectory, name));
+    final file = fs.file(p.join(repository.gitDirectory, name));
     if (!file.existsSync()) continue;
     final text = file.readAsStringSync().trim();
     if (text.length == ObjectId.hexLength) {
@@ -209,13 +210,13 @@ RepackResult repack(
   // point is an object in neither.
   var looseRemoved = 0;
   var pruned = 0;
-  final toDelete = <File>[];
+  final toDelete = <GitFsFile>[];
   final wasPacked = <String, bool>{};
 
   for (final id in repository.objects.loose.listAll().toList()) {
     final isLive = live.contains(id);
     if (!packed.contains(id) && (isLive || !prune)) continue;
-    final file = File(repository.objects.loose.pathFor(id));
+    final file = fs.file(repository.objects.loose.pathFor(id));
     if (!file.existsSync()) continue;
     toDelete.add(file);
     wasPacked[file.path] = packed.contains(id);
@@ -232,22 +233,22 @@ RepackResult repack(
   // ---- packs the new one supersedes ----
   var packsRemoved = 0;
   final packDirectory =
-      Directory(p.join(repository.objects.loose.objectsDirectory, 'pack'));
+      fs.directory(p.join(repository.objects.loose.objectsDirectory, 'pack'));
   if (packDirectory.existsSync()) {
     for (final entry in packDirectory.listSync()) {
-      if (entry is! File || !entry.path.endsWith('.pack')) continue;
+      if (entry is! GitFsFile || !entry.path.endsWith('.pack')) continue;
       if (packPath != null && p.equals(entry.path, packPath)) continue;
 
       final base = p.withoutExtension(entry.path);
 
       // A `.keep` is a request not to remove this pack — left by a fetch in
       // progress, or by someone who meant it. It is not ours to overrule.
-      if (File('$base.keep').existsSync()) continue;
+      if (fs.file('$base.keep').existsSync()) continue;
 
       // A pack is dropped only when every object in it is in the new one.
       // Anything less and this would be deleting the only copy of something.
       final index = '$base.idx';
-      if (!File(index).existsSync()) continue;
+      if (!fs.file(index).existsSync()) continue;
 
       final held = repository.objects.packs
           .where((pack) => p.equals(pack.packPath, entry.path))
@@ -270,10 +271,15 @@ RepackResult repack(
       // a repository that no longer passes `fsck`.
       _deleteAll([
         entry,
-        File(index),
-        for (final companion in const ['.rev', '.bitmap', '.promisor',
-          '.mtimes'])
-          if (File('$base$companion').existsSync()) File('$base$companion'),
+        fs.file(index),
+        for (final companion in const [
+          '.rev',
+          '.bitmap',
+          '.promisor',
+          '.mtimes',
+        ])
+          if (fs.file('$base$companion').existsSync())
+            fs.file('$base$companion'),
       ]);
       packsRemoved += 1;
     }
@@ -339,15 +345,15 @@ Set<ObjectId> unreachableObjects(Repository repository) {
 /// The attribute is cleared for the whole batch in one go rather than per
 /// file: this runs over every loose object in the repository, and a process
 /// each would cost more than the repack.
-List<File> _deleteAll(List<File> files) {
-  final gone = <File>[];
-  final stubborn = <File>[];
+List<GitFsFile> _deleteAll(List<GitFsFile> files) {
+  final gone = <GitFsFile>[];
+  final stubborn = <GitFsFile>[];
 
   for (final file in files) {
     try {
       file.deleteSync();
       gone.add(file);
-    } on FileSystemException {
+    } on GitFsException {
       stubborn.add(file);
     }
   }
@@ -364,7 +370,7 @@ List<File> _deleteAll(List<File> files) {
     try {
       file.deleteSync();
       gone.add(file);
-    } on FileSystemException {
+    } on GitFsException {
       // Held open by something else. Left behind rather than fought over:
       // an extra copy of an object that is also in the pack is waste, not
       // corruption.
@@ -382,19 +388,19 @@ List<File> _deleteAll(List<File> files) {
 /// is a cache, so deleting it is always safe and git rebuilds it on request.
 /// The same goes for `info/packs`, which is the list a dumb-HTTP client reads
 /// and which would otherwise send that client after a file that has gone.
-void _dropStalePackIndexes(Directory packDirectory) {
+void _dropStalePackIndexes(GitFsDirectory packDirectory) {
   if (!packDirectory.existsSync()) return;
 
-  final stale = <File>[];
+  final stale = <GitFsFile>[];
   for (final entry in packDirectory.listSync()) {
-    if (entry is! File) continue;
+    if (entry is! GitFsFile) continue;
     final name = p.basename(entry.path);
     if (name == 'multi-pack-index' || name.startsWith('multi-pack-index-')) {
       stale.add(entry);
     }
   }
 
-  final info = File(p.join(
+  final info = fs.file(p.join(
     p.dirname(packDirectory.path),
     'info',
     'packs',
@@ -405,10 +411,10 @@ void _dropStalePackIndexes(Directory packDirectory) {
 }
 
 void _pruneEmptyFanout(String objectsDirectory) {
-  final root = Directory(objectsDirectory);
+  final root = fs.directory(objectsDirectory);
   if (!root.existsSync()) return;
   for (final entry in root.listSync()) {
-    if (entry is! Directory) continue;
+    if (entry is! GitFsDirectory) continue;
     final name = p.basename(entry.path);
     if (name.length != 2) continue; // not a fan-out directory
     if (entry.listSync().isEmpty) entry.deleteSync();

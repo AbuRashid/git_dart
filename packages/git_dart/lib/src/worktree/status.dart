@@ -1,8 +1,8 @@
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
 import '../diff/tree_diff.dart';
+import '../fs/git_fs.dart';
 import '../index/git_index.dart';
 import '../objects/git_object.dart';
 import '../objects/tree.dart';
@@ -114,7 +114,7 @@ RepositoryStatus statusOf(
   }
 
   final index = repo.index ?? GitIndex.empty();
-  final indexFile = File(p.join(repo.gitDirectory, 'index'));
+  final indexFile = fs.file(p.join(repo.gitDirectory, 'index'));
   final indexWrittenAt =
       indexFile.existsSync() ? indexFile.statSync().modified : null;
   final headId = repo.headId;
@@ -153,11 +153,13 @@ RepositoryStatus statusOf(
 
   for (final entry in indexByPath.values) {
     if (conflicted.contains(entry.path)) continue;
-    final file = File(p.join(workTree, entry.path.replaceAll('/', p.separator)));
+    final file = fs.file(
+      p.join(workTree, entry.path.replaceAll('/', p.separator)),
+    );
 
     if (!file.existsSync()) {
       // A path recorded as a symlink may exist as a link rather than a file.
-      final link = Link(file.path);
+      final link = fs.link(file.path);
       if (!link.existsSync()) {
         unstaged[entry.path] = ChangeKind.deleted;
         continue;
@@ -251,7 +253,7 @@ void _walkWorkTree(
   List<String> out, {
   bool collapseDirectories = true,
 }) {
-  final directory = Directory(
+  final directory = fs.directory(
     prefix.isEmpty
         ? workTree
         : p.join(workTree, prefix.replaceAll('/', p.separator)),
@@ -260,7 +262,7 @@ void _walkWorkTree(
 
   // A `.gitignore` in a subdirectory applies from there down, so the rules
   // grow as the walk descends and are discarded on the way back up.
-  final local = File(p.join(directory.path, '.gitignore'));
+  final local = fs.file(p.join(directory.path, '.gitignore'));
   if (prefix.isNotEmpty && local.existsSync()) {
     rules = IgnoreRules()
       ..patterns.addAll(rules.patterns)
@@ -273,15 +275,15 @@ void _walkWorkTree(
     if (prefix.isEmpty && name == '.git') continue;
     final path = '$prefix$name';
 
-    if (entry is Directory) {
+    if (entry is GitFsDirectory) {
       if (rules.isIgnored(path, isDirectory: true)) continue;
 
       // A nested repository is one entry, not its contents: its files belong
       // to it, and reporting them here would be reporting another
       // repository's business.
       final isNestedRepository =
-          Directory(p.join(entry.path, '.git')).existsSync() ||
-              File(p.join(entry.path, '.git')).existsSync();
+          fs.directory(p.join(entry.path, '.git')).existsSync() ||
+              fs.file(p.join(entry.path, '.git')).existsSync();
 
       final holdsTrackedFiles = tracked.any((t) => t.startsWith('$path/'));
 

@@ -1,7 +1,7 @@
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/identity.dart';
@@ -58,26 +58,28 @@ class SequencerState {
       );
 
   void writeTo(String gitDirectory) {
-    final directory = Directory(directoryFor(gitDirectory, operation))
+    final directory = fs.directory(directoryFor(gitDirectory, operation))
       ..createSync(recursive: true);
 
-    File(p.join(directory.path, 'head')).writeAsStringSync(
+    fs.file(p.join(directory.path, 'head')).writeAsStringSync(
       '${originalHead.hex}\n',
     );
-    File(p.join(directory.path, 'current')).writeAsStringSync(
+    fs.file(p.join(directory.path, 'current')).writeAsStringSync(
       '${current.hex}\n',
     );
-    File(p.join(directory.path, 'todo')).writeAsStringSync(
+    fs.file(p.join(directory.path, 'todo')).writeAsStringSync(
       remaining.map((id) => '$_name ${id.hex}').join('\n') +
           (remaining.isEmpty ? '' : '\n'),
     );
     if (branch != null) {
-      File(p.join(directory.path, 'head-name')).writeAsStringSync('$branch\n');
+      fs
+          .file(p.join(directory.path, 'head-name'))
+          .writeAsStringSync('$branch\n');
     }
 
     // The name of the commit being applied, where git puts it and where a
     // person looking at a conflicted tree will expect to find it.
-    File(p.join(gitDirectory, switch (operation) {
+    fs.file(p.join(gitDirectory, switch (operation) {
       SequencerOperation.cherryPick => 'CHERRY_PICK_HEAD',
       SequencerOperation.revert => 'REVERT_HEAD',
       SequencerOperation.rebase => 'REBASE_HEAD',
@@ -87,13 +89,13 @@ class SequencerState {
 
   static SequencerState? read(String gitDirectory) {
     for (final operation in SequencerOperation.values) {
-      final directory = Directory(directoryFor(gitDirectory, operation));
-      final current = File(p.join(directory.path, 'current'));
+      final directory = fs.directory(directoryFor(gitDirectory, operation));
+      final current = fs.file(p.join(directory.path, 'current'));
       if (!current.existsSync()) continue;
 
-      final head = File(p.join(directory.path, 'head'));
-      final todo = File(p.join(directory.path, 'todo'));
-      final headName = File(p.join(directory.path, 'head-name'));
+      final head = fs.file(p.join(directory.path, 'head'));
+      final todo = fs.file(p.join(directory.path, 'todo'));
+      final headName = fs.file(p.join(directory.path, 'head-name'));
 
       return SequencerState(
         operation: operation,
@@ -115,7 +117,7 @@ class SequencerState {
 
   static void clear(String gitDirectory) {
     for (final operation in SequencerOperation.values) {
-      final directory = Directory(directoryFor(gitDirectory, operation));
+      final directory = fs.directory(directoryFor(gitDirectory, operation));
       if (directory.existsSync()) directory.deleteSync(recursive: true);
     }
     for (final name in const [
@@ -123,7 +125,7 @@ class SequencerState {
       'REVERT_HEAD',
       'REBASE_HEAD',
     ]) {
-      final file = File(p.join(gitDirectory, name));
+      final file = fs.file(p.join(gitDirectory, name));
       if (file.existsSync()) file.deleteSync();
     }
   }

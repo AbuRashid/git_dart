@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../index/git_index.dart';
 import '../object_id.dart';
 import '../objects/git_object.dart';
@@ -107,12 +108,12 @@ CheckoutResult checkoutTree(
   // file gone before the directory can be made.
   final removedPaths = toRemove.toList();
   for (final path in removedPaths) {
-    final file = File(_absolute(workTree, path));
+    final file = fs.file(_absolute(workTree, path));
     if (file.existsSync()) {
       file.deleteSync();
       removed += 1;
-    } else if (Link(file.path).existsSync()) {
-      Link(file.path).deleteSync();
+    } else if (fs.link(file.path).existsSync()) {
+      fs.link(file.path).deleteSync();
       removed += 1;
     }
   }
@@ -155,28 +156,28 @@ bool _writeEntry(
   final content = mode == FileMode.symlink
       ? stored
       : toWorkingTree(stored, repo.attributes.conversionFor(path, stored));
-  Directory(p.dirname(absolute)).createSync(recursive: true);
+  fs.directory(p.dirname(absolute)).createSync(recursive: true);
 
-  final existingLink = Link(absolute);
+  final existingLink = fs.link(absolute);
   if (existingLink.existsSync()) existingLink.deleteSync();
 
   if (mode == FileMode.symlink) {
     // The blob holds the target path (`objects.modes-in-a-tree`).
     try {
-      final file = File(absolute);
+      final file = fs.file(absolute);
       if (file.existsSync()) file.deleteSync();
-      Link(absolute).createSync(utf8.decode(content, allowMalformed: true));
+      fs.link(absolute).createSync(utf8.decode(content, allowMalformed: true));
       return true;
-    } on FileSystemException {
+    } on GitFsException {
       // Windows needs a privilege for this that a normal process does not
       // have. Writing the target as file content is what git itself does when
       // symlinks are unavailable, and it is recorded as degraded.
-      File(absolute).writeAsBytesSync(content);
+      fs.file(absolute).writeAsBytesSync(content);
       return false;
     }
   }
 
-  File(absolute).writeAsBytesSync(content);
+  fs.file(absolute).writeAsBytesSync(content);
 
   // dart:io cannot change a file's permissions, so the executable bit of
   // mode 100755 is not reproduced. On Windows there is nothing to reproduce;
@@ -216,7 +217,7 @@ void _removeEmptyDirectories(String workTree, List<String> removedPaths) {
     ..sort((a, b) => b.split('/').length.compareTo(a.split('/').length));
 
   for (final relative in ordered) {
-    final directory = Directory(_absolute(workTree, relative));
+    final directory = fs.directory(_absolute(workTree, relative));
     if (!directory.existsSync()) continue;
     if (directory.listSync().isEmpty) directory.deleteSync();
   }
@@ -255,7 +256,7 @@ void _collect(
     }
     if (entry.mode.isSubmodule) continue;
 
-    final file = File(_absolute(workTree, path));
+    final file = fs.file(_absolute(workTree, path));
     final stat = file.existsSync() ? file.statSync() : null;
     final seconds = stat == null
         ? 0

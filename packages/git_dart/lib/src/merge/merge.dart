@@ -1,10 +1,10 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
 import '../diff/text_diff.dart';
+import '../fs/git_fs.dart';
 import '../graph/graph_walks.dart';
 import '../index/git_index.dart';
 import '../object_id.dart';
@@ -363,7 +363,7 @@ ObjectId _writeFlatTree(
     final entry = resolved[path];
     if (conflictStages.containsKey(path)) continue;
     if (entry == null) {
-      final file = File(p.join(workTree, path.replaceAll('/', p.separator)));
+      final file = fs.file(p.join(workTree, path.replaceAll('/', p.separator)));
       if (file.existsSync()) file.deleteSync();
       continue;
     }
@@ -575,9 +575,9 @@ MergeResult merge(
   if (conflicts.isNotEmpty) {
     // What is being merged, so a later commit can record the second parent —
     // and so the repository can say it is mid-merge.
-    File(p.join(repository.gitDirectory, 'MERGE_HEAD'))
+    fs.file(p.join(repository.gitDirectory, 'MERGE_HEAD'))
         .writeAsStringSync('${theirs.hex}\n');
-    File(p.join(repository.gitDirectory, 'MERGE_MSG')).writeAsStringSync(
+    fs.file(p.join(repository.gitDirectory, 'MERGE_MSG')).writeAsStringSync(
       message ?? 'Merge ${theirs.hex.substring(0, 8)}\n',
     );
     return MergeResult(
@@ -630,7 +630,7 @@ Map<String, TreeEntry> _flatten(Repository repository, Tree? tree) {
 }
 
 void _writeWorkingFile(String workTree, String path, Uint8List content) {
-  final file = File(p.join(workTree, path.replaceAll('/', p.separator)))
+  final file = fs.file(p.join(workTree, path.replaceAll('/', p.separator)))
     ..parent.createSync(recursive: true);
   file.writeAsBytesSync(content);
 }

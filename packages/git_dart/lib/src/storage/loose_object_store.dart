@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/git_object.dart';
 
@@ -21,11 +22,11 @@ class LooseObjectStore {
     return p.join(objectsDirectory, hex.substring(0, 2), hex.substring(2));
   }
 
-  bool contains(ObjectId id) => File(pathFor(id)).existsSync();
+  bool contains(ObjectId id) => fs.file(pathFor(id)).existsSync();
 
   /// Returns the object's kind and content, or null if it is not stored loose.
   ({ObjectKind kind, Uint8List content})? read(ObjectId id) {
-    final file = File(pathFor(id));
+    final file = fs.file(pathFor(id));
     if (!file.existsSync()) return null;
     final inflated = Uint8List.fromList(zlib.decode(file.readAsBytesSync()));
     return GitObject.split(inflated);
@@ -36,13 +37,13 @@ class LooseObjectStore {
   /// to overwrite.
   ObjectId write(GitObject object) {
     final id = object.id;
-    final file = File(pathFor(id));
+    final file = fs.file(pathFor(id));
     if (file.existsSync()) return id;
 
     file.parent.createSync(recursive: true);
     // Write to a temporary name and rename, so a reader never sees a partial
     // object under a name that promises complete content.
-    final temporary = File('${file.path}.tmp${pid}_${object.hashCode}');
+    final temporary = fs.file('${file.path}.tmp${pid}_${object.hashCode}');
     temporary.writeAsBytesSync(zlib.encode(object.serialise()));
     temporary.renameSync(file.path);
     return id;
@@ -50,10 +51,10 @@ class LooseObjectStore {
 
   /// Every loose object name in the store. Unordered.
   Iterable<ObjectId> listAll() sync* {
-    final root = Directory(objectsDirectory);
+    final root = fs.directory(objectsDirectory);
     if (!root.existsSync()) return;
     for (final entry in root.listSync()) {
-      if (entry is! Directory) continue;
+      if (entry is! GitFsDirectory) continue;
       final prefix = p.basename(entry.path);
       if (prefix.length != 2) continue; // skips info/ and pack/
       for (final file in entry.listSync()) {

@@ -1,6 +1,6 @@
-import 'dart:io';
 import 'dart:typed_data';
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 
 /// The companion index of a packfile: object name to offset within the pack.
@@ -33,7 +33,7 @@ class PackIndex {
   int get objectCount => _fanout[255];
 
   factory PackIndex.open(String path) =>
-      PackIndex.parse(File(path).readAsBytesSync());
+      PackIndex.parse(fs.file(path).readAsBytesSync());
 
   factory PackIndex.parse(Uint8List bytes) {
     final data = ByteData.sublistView(bytes);

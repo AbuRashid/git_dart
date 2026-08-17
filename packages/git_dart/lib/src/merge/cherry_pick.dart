@@ -1,7 +1,7 @@
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/identity.dart';
@@ -170,7 +170,7 @@ ApplyResult _apply(
       branch: repository.refs.currentBranch,
     ).writeTo(repository.gitDirectory);
 
-    File(p.join(repository.gitDirectory, 'MERGE_MSG'))
+    fs.file(p.join(repository.gitDirectory, 'MERGE_MSG'))
         .writeAsStringSync(_messageFor(source, revert: revert));
 
     return ApplyResult(
@@ -261,7 +261,7 @@ ObjectId continueApply(Repository repository, {Identity? committer}) {
   );
 
   SequencerState.clear(repository.gitDirectory);
-  final message = File(p.join(repository.gitDirectory, 'MERGE_MSG'));
+  final message = fs.file(p.join(repository.gitDirectory, 'MERGE_MSG'));
   if (message.existsSync()) message.deleteSync();
 
   return id;

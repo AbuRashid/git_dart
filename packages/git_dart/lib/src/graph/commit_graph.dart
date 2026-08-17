@@ -19,12 +19,12 @@
 /// never consulted for what is *true*, only for what can be skipped.
 library;
 
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 
 /// What the file records about one commit.
@@ -96,7 +96,9 @@ class CommitGraph {
   /// A missing file is the ordinary case, not an error: the cache is optional
   /// and everything works without it.
   static CommitGraph? open(String gitDirectory) {
-    final file = File(p.join(gitDirectory, 'objects', 'info', 'commit-graph'));
+    final file = fs.file(
+      p.join(gitDirectory, 'objects', 'info', 'commit-graph'),
+    );
     if (!file.existsSync()) return null;
     try {
       return CommitGraph.parse(file.readAsBytesSync());

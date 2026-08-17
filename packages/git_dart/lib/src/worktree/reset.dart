@@ -1,7 +1,7 @@
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../index/git_index.dart';
 import '../object_id.dart';
 import '../objects/git_object.dart';
@@ -73,7 +73,7 @@ ResetResult reset(
   // history and the other is the single step a person is most likely to want
   // back.
   if (from != null) {
-    File(p.join(repository.gitDirectory, 'ORIG_HEAD'))
+    fs.file(p.join(repository.gitDirectory, 'ORIG_HEAD'))
         .writeAsStringSync('${from.hex}\n');
   }
 
@@ -166,7 +166,7 @@ void restorePath(
   if (workTree == null) {
     throw StateError('a bare repository has no working tree to restore');
   }
-  final file = File(p.join(workTree, path.replaceAll('/', p.separator)));
+  final file = fs.file(p.join(workTree, path.replaceAll('/', p.separator)));
 
   if (entry == null || entry.mode.isTree) {
     // The source does not have this path, so restoring it means removing it.

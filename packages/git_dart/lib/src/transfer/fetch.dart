@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/git_object.dart';
@@ -950,7 +951,7 @@ Future<int> _receivePack(
   // response is the size of what is being cloned, and holding it whole — then
   // the pack it contains, then every object inflated out of that — is three
   // copies of a repository at once.
-  final temporary = File(p.join(
+  final temporary = fs.file(p.join(
     repository.gitDirectory,
     'objects',
     'pack',
@@ -995,7 +996,7 @@ Future<int> _receivePack(
 }
 
 /// Writes a stream of pack bytes straight to a file.
-Future<int> _writeStreamTo(File file, Stream<List<int>> bytes) async {
+Future<int> _writeStreamTo(GitFsFile file, Stream<List<int>> bytes) async {
   final sink = file.openWrite();
   var written = 0;
   try {
@@ -1039,7 +1040,7 @@ List<String> _textPackets(Uint8List bytes) {
 /// With side-band-64k the pack comes in pkt-lines whose first byte says which
 /// band it is: 1 is the pack, 2 is progress for a person, 3 is an error.
 Future<int> _streamPackTo(
-  File file,
+  GitFsFile file,
   Stream<List<int>> response, {
   required bool usedSideBand,
   bool version2 = false,

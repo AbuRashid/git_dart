@@ -1,7 +1,7 @@
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import 'git_config.dart';
 import '../remote/remote.dart' show RemoteStore;
 
@@ -50,7 +50,7 @@ class ConfigWriter {
         ConfigScope.local => p.join(gitDirectory, 'config'),
         ConfigScope.global => _firstGlobalPath(),
         ConfigScope.system => GitConfig.systemConfigPaths
-            .where((path) => File(path).existsSync())
+            .where((path) => fs.file(path).existsSync())
             .firstOrNull,
       };
 
@@ -60,7 +60,7 @@ class ConfigWriter {
     final candidates = GitConfig.globalConfigPaths;
     if (candidates.isEmpty) return null;
     for (final path in candidates) {
-      if (File(path).existsSync()) return path;
+      if (fs.file(path).existsSync()) return path;
     }
     return candidates.last;
   }
@@ -76,8 +76,8 @@ class ConfigWriter {
       ConfigScope.system,
     ]) {
       final path = pathFor(scope);
-      if (path == null || !File(path).existsSync()) continue;
-      final value = GitConfig.parse(File(path).readAsStringSync())[key];
+      if (path == null || !fs.file(path).existsSync()) continue;
+      final value = GitConfig.parse(fs.file(path).readAsStringSync())[key];
       if (value != null) return ConfigOrigin(scope, value);
     }
     return null;
@@ -86,8 +86,8 @@ class ConfigWriter {
   /// Everything a scope's file sets, for a reader that wants the whole picture.
   GitConfig read(ConfigScope scope) {
     final path = pathFor(scope);
-    if (path == null || !File(path).existsSync()) return GitConfig.empty;
-    return GitConfig.parse(File(path).readAsStringSync());
+    if (path == null || !fs.file(path).existsSync()) return GitConfig.empty;
+    return GitConfig.parse(fs.file(path).readAsStringSync());
   }
 
   /// Sets `section.key` — or `section.subsection.key` — in [scope].
@@ -98,7 +98,7 @@ class ConfigWriter {
     }
 
     final parts = _split(key);
-    final file = File(path);
+    final file = fs.file(path);
     final lines = file.existsSync() ? file.readAsLinesSync() : <String>[];
     final written = RemoteStore.escapeConfigValue(value);
 
@@ -151,10 +151,10 @@ class ConfigWriter {
   /// Removes a setting, so whatever a wider scope says applies again.
   void unset(String key, ConfigScope scope) {
     final path = pathFor(scope);
-    if (path == null || !File(path).existsSync()) return;
+    if (path == null || !fs.file(path).existsSync()) return;
 
     final parts = _split(key);
-    final file = File(path);
+    final file = fs.file(path);
     final out = <String>[];
     var inSection = false;
 
@@ -172,11 +172,11 @@ class ConfigWriter {
     _write(file, out);
   }
 
-  void _write(File file, List<String> lines) {
+  void _write(GitFsFile file, List<String> lines) {
     file.parent.createSync(recursive: true);
     // The same rename dance as a ref: a half-written config makes a
     // repository unreadable to git as well as to this.
-    final temporary = File('${file.path}.lock');
+    final temporary = fs.file('${file.path}.lock');
     temporary.writeAsStringSync(
       lines.isEmpty ? '' : '${lines.join('\n')}\n',
     );

@@ -1,8 +1,8 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/identity.dart';
 
@@ -94,7 +94,7 @@ class Reflog {
   }
 
   static Reflog read(String gitDirectory, String refPath) {
-    final file = File(pathOf(gitDirectory, refPath));
+    final file = fs.file(pathOf(gitDirectory, refPath));
     if (!file.existsSync()) return Reflog(refPath: refPath, entries: const []);
 
     final entries = <ReflogEntry>[];

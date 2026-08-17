@@ -1,8 +1,8 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/identity.dart';
 import 'reflog.dart';
@@ -110,7 +110,7 @@ class RefStore {
   /// Reads one ref without following symbolic targets. Returns null when the
   /// ref does not exist.
   Ref? read(String refPath) {
-    final file = File(_pathOf(refPath));
+    final file = fs.file(_pathOf(refPath));
     if (file.existsSync()) {
       final text = file.readAsStringSync().trim();
       if (text.startsWith('ref:')) {
@@ -160,7 +160,7 @@ class RefStore {
   bool get isDetached => head?.target is DirectRef;
 
   Map<String, ObjectId> readPackedRefs() {
-    final file = File(p.join(gitDirectory, 'packed-refs'));
+    final file = fs.file(p.join(gitDirectory, 'packed-refs'));
     if (!file.existsSync()) return const {};
 
     final refs = <String, ObjectId>{};
@@ -192,10 +192,10 @@ class RefStore {
 
     // A loose ref shadows the packed one of the same name: packed-refs is a
     // snapshot, and the loose file is what moved since.
-    final root = Directory(p.join(gitDirectory, 'refs'));
+    final root = fs.directory(p.join(gitDirectory, 'refs'));
     if (root.existsSync()) {
       for (final entry in root.listSync(recursive: true)) {
-        if (entry is! File) continue;
+        if (entry is! GitFsFile) continue;
         final refPath =
             p.relative(entry.path, from: gitDirectory).replaceAll(r'\', '/');
         if (!refPath.startsWith(prefix)) continue;
@@ -272,7 +272,7 @@ class RefStore {
   }
 
   void _writeAtomically(String refPath, String contents) {
-    final file = File(_pathOf(refPath));
+    final file = fs.file(_pathOf(refPath));
     final lock = _acquireLock(file);
     try {
       lock.writeAsStringSync(contents);
@@ -288,12 +288,12 @@ class RefStore {
   /// A lock left behind by a process that died stops every later write, which
   /// is deliberate and is what git does: the alternative is deciding on its
   /// owner's behalf that the interrupted update should be abandoned.
-  File _acquireLock(File file) {
+  GitFsFile _acquireLock(GitFsFile file) {
     file.parent.createSync(recursive: true);
-    final lock = File('${file.path}.lock');
+    final lock = fs.file('${file.path}.lock');
     try {
       lock.createSync(exclusive: true);
-    } on FileSystemException {
+    } on GitFsException {
       throw RefLockedException(p.relative(file.path, from: gitDirectory));
     }
     return lock;
@@ -312,7 +312,7 @@ class RefStore {
       refPath.startsWith('refs/heads/') ||
       refPath.startsWith('refs/remotes/') ||
       refPath.startsWith('refs/notes/') ||
-      File(Reflog.pathOf(gitDirectory, refPath)).existsSync();
+      fs.file(Reflog.pathOf(gitDirectory, refPath)).existsSync();
 
   void _log(
     String refPath,
@@ -343,12 +343,12 @@ class RefStore {
   }
 
   void _appendReflog(String refPath, ReflogEntry entry) {
-    final file = File(Reflog.pathOf(gitDirectory, refPath));
+    final file = fs.file(Reflog.pathOf(gitDirectory, refPath));
     file.parent.createSync(recursive: true);
     // Append rather than rewrite: the log is the one part of a repository
     // where losing older lines defeats the purpose, and an append of one short
     // line is as close to atomic as a filesystem offers.
-    file.writeAsStringSync(entry.line, mode: FileMode.append, flush: true);
+    file.writeAsStringSync(entry.line, append: true, flush: true);
   }
 
   /// The recorded history of one ref, oldest first. Empty when nothing has
@@ -357,18 +357,18 @@ class RefStore {
 
   /// Every ref that has a reflog, by path.
   List<String> refsWithReflogs() {
-    final root = Directory(p.join(gitDirectory, 'logs'));
+    final root = fs.directory(p.join(gitDirectory, 'logs'));
     if (!root.existsSync()) return const [];
     return [
       for (final entry in root.listSync(recursive: true))
-        if (entry is File)
+        if (entry is GitFsFile)
           p.relative(entry.path, from: root.path).replaceAll(r'\', '/'),
     ]..sort();
   }
 
   /// Drops a ref's log, as deleting the ref should.
   void deleteReflog(String refPath) {
-    final file = File(Reflog.pathOf(gitDirectory, refPath));
+    final file = fs.file(Reflog.pathOf(gitDirectory, refPath));
     if (file.existsSync()) file.deleteSync();
   }
 
@@ -376,7 +376,7 @@ class RefStore {
 
   /// Removes a loose ref, leaving any packed one in place.
   bool deleteLoose(String refPath) {
-    final file = File(_pathOf(refPath));
+    final file = fs.file(_pathOf(refPath));
     if (!file.existsSync()) return false;
     file.deleteSync();
     _pruneEmptyDirectories(file.parent);
@@ -388,7 +388,7 @@ class RefStore {
   /// They are not harmless: with `refs/heads/feature/one` gone, the empty
   /// `feature` directory stops a branch called `feature` from being created,
   /// because a file and a directory cannot share a name.
-  void _pruneEmptyDirectories(Directory directory) {
+  void _pruneEmptyDirectories(GitFsDirectory directory) {
     final root = p.join(gitDirectory, 'refs');
     var current = directory;
     while (p.isWithin(root, current.path)) {
@@ -408,7 +408,7 @@ class RefStore {
     // later ref of the same name has not been anywhere.
     deleteReflog(refPath);
     final hadLoose = deleteLoose(refPath);
-    final packed = File(p.join(gitDirectory, 'packed-refs'));
+    final packed = fs.file(p.join(gitDirectory, 'packed-refs'));
     if (!packed.existsSync()) return hadLoose;
 
     final kept = <String>[];
@@ -439,7 +439,7 @@ class RefStore {
     }
 
     if (removedPacked) {
-      final temporary = File('${packed.path}.lock');
+      final temporary = fs.file('${packed.path}.lock');
       temporary.writeAsStringSync(
         kept.isEmpty ? '' : '${kept.join('\n')}\n',
       );

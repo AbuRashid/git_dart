@@ -1,9 +1,12 @@
 import 'dart:convert';
+// Inflating a packed object still uses dart:io's zlib: it is the only streaming
+// inflater in the SDK. A web backend will need another one.
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/git_object.dart';
 import 'pack_index.dart';
@@ -44,7 +47,7 @@ class PackFile {
   final String packPath;
   final PackIndex index;
 
-  final RandomAccessFile _file;
+  final GitFsHandle _file;
   final int _fileLength;
 
   /// Materialised objects, keyed by their offset in the pack. A delta chain
@@ -59,7 +62,7 @@ class PackFile {
   factory PackFile.open(String packPath) {
     final indexPath = '${p.withoutExtension(packPath)}.idx';
     final index = PackIndex.open(indexPath);
-    final file = File(packPath);
+    final file = fs.file(packPath);
     final handle = file.openSync();
     final pack = PackFile._(packPath, index, handle, file.lengthSync());
     pack._verifyHeader();
@@ -321,29 +324,29 @@ class PackFile {
 /// Every pack in `objects/pack`, newest first — which is where a recently
 /// fetched object is most likely to be.
 List<PackFile> openPacks(String objectsDirectory) {
-  final directory = Directory(p.join(objectsDirectory, 'pack'));
+  final directory = fs.directory(p.join(objectsDirectory, 'pack'));
   if (!directory.existsSync()) return [];
 
   final packs = <PackFile>[];
   for (final entry in directory.listSync()) {
-    if (entry is! File || !entry.path.endsWith('.pack')) continue;
+    if (entry is! GitFsFile || !entry.path.endsWith('.pack')) continue;
     final indexPath = '${p.withoutExtension(entry.path)}.idx';
     // A pack without its index cannot be read by name, only scanned; a fetch
     // in progress leaves exactly this state, so it is skipped rather than an
     // error.
-    if (!File(indexPath).existsSync()) continue;
+    if (!fs.file(indexPath).existsSync()) continue;
     packs.add(PackFile.open(entry.path));
   }
-  packs.sort((a, b) => File(b.packPath)
+  packs.sort((a, b) => fs.file(b.packPath)
       .lastModifiedSync()
-      .compareTo(File(a.packPath).lastModifiedSync()));
+      .compareTo(fs.file(a.packPath).lastModifiedSync()));
   return packs;
 }
 
 /// Reads the `objects/info/alternates` file: other object directories this
 /// repository borrows from. One absolute or relative path per line.
 List<String> readAlternates(String objectsDirectory) {
-  final file = File(p.join(objectsDirectory, 'info', 'alternates'));
+  final file = fs.file(p.join(objectsDirectory, 'info', 'alternates'));
   if (!file.existsSync()) return [];
   return LineSplitter.split(file.readAsStringSync())
       .map((line) => line.trim())

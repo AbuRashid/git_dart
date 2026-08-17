@@ -1,11 +1,11 @@
 import 'dart:collection';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart' show Inflate, InputStream, getCrc32;
 import 'package:crypto/crypto.dart';
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/git_object.dart';
 import 'pack_index_writer.dart';
@@ -61,8 +61,8 @@ class PackIndexer {
 
   PackIndexer(this.path, {this.cacheBytes = 64 * 1024 * 1024});
 
-  late final RandomAccessFile _file = File(path).openSync();
-  late final int _length = File(path).lengthSync();
+  late final GitFsHandle _file = fs.file(path).openSync();
+  late final int _length = fs.file(path).lengthSync();
 
   final _records = <int, _Record>{};
   final _offsetOfName = <ObjectId, int>{};

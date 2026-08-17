@@ -1,8 +1,8 @@
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
 import '../config/git_config.dart';
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 
 /// A rule mapping refs on one side to refs on the other.
@@ -157,7 +157,7 @@ class RemoteStore {
     }
     _validateName(name);
 
-    final file = File(_configPath);
+    final file = fs.file(_configPath);
     final existing = file.existsSync() ? file.readAsStringSync() : '';
     final separator =
         existing.isEmpty || existing.endsWith('\n') ? '' : '\n';
@@ -191,7 +191,7 @@ class RemoteStore {
   /// Removes the remote's config section. Its tracking refs are removed too,
   /// since they describe a place this repository no longer knows about.
   void remove(String name) {
-    final file = File(_configPath);
+    final file = fs.file(_configPath);
     if (!file.existsSync()) return;
 
     final kept = <String>[];
@@ -206,7 +206,9 @@ class RemoteStore {
     }
     file.writeAsStringSync('${kept.join('\n')}\n');
 
-    final tracking = Directory(p.join(gitDirectory, 'refs', 'remotes', name));
+    final tracking = fs.directory(
+      p.join(gitDirectory, 'refs', 'remotes', name),
+    );
     if (tracking.existsSync()) tracking.deleteSync(recursive: true);
   }
 

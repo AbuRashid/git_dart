@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../config/git_config.dart';
 import '../diff/text_diff.dart';
+import '../fs/git_fs.dart';
 
 /// What one `.gitattributes` line says about the paths it matches.
 class AttributeRule {
@@ -66,7 +67,7 @@ class Attributes {
   Attributes({this.autocrlf = 'false', this.eol = 'native'});
 
   void addFile(String path, {String base = ''}) {
-    final file = File(path);
+    final file = fs.file(path);
     if (!file.existsSync()) return;
     addText(file.readAsStringSync(), base: base);
   }

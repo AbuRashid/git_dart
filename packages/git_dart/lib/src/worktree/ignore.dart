@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../config/git_config.dart';
+import '../fs/git_fs.dart';
 
 /// One line of a `.gitignore`.
 class IgnorePattern {
@@ -44,7 +45,7 @@ class IgnoreRules {
   /// Reads a `.gitignore`-shaped file. [base] is its directory relative to the
   /// working tree root, `''` at the root.
   void addFile(String path, {String base = ''}) {
-    final file = File(path);
+    final file = fs.file(path);
     if (!file.existsSync()) return;
     addText(file.readAsStringSync(), base: base);
   }

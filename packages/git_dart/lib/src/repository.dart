@@ -1,6 +1,5 @@
 import 'dart:collection';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -8,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'config/git_config.dart';
 import 'diff/text_diff.dart';
 import 'diff/tree_diff.dart';
+import 'fs/git_fs.dart';
 import 'graph/commit_graph.dart';
 import 'graph/graph_walks.dart';
 import 'index/git_index.dart';
@@ -59,7 +59,7 @@ class Repository {
 
   /// The repository containing [path], or null.
   static Repository? discover(String path) {
-    var directory = Directory(p.absolute(path));
+    var directory = fs.directory(p.absolute(path));
     while (true) {
       final candidate = p.join(directory.path, '.git');
       // A `.git` directory that holds no repository is not one: an abandoned
@@ -69,10 +69,10 @@ class Repository {
       if (_looksLikeGitDirectory(candidate)) {
         return Repository.at(candidate, workTree: directory.path);
       }
-      if (File(candidate).existsSync()) {
+      if (fs.file(candidate).existsSync()) {
         // A `.git` file rather than a directory: a worktree or a submodule
         // points at its real git directory this way.
-        final text = File(candidate).readAsStringSync().trim();
+        final text = fs.file(candidate).readAsStringSync().trim();
         if (text.startsWith('gitdir:')) {
           final target = text.substring(7).trim();
           final resolved =
@@ -93,9 +93,9 @@ class Repository {
   /// git's own test for a git directory: HEAD, an object store and a ref
   /// namespace. The three things a repository is.
   static bool _looksLikeGitDirectory(String path) =>
-      File(p.join(path, 'HEAD')).existsSync() &&
-      Directory(p.join(path, 'objects')).existsSync() &&
-      Directory(p.join(path, 'refs')).existsSync();
+      fs.file(p.join(path, 'HEAD')).existsSync() &&
+      fs.directory(p.join(path, 'objects')).existsSync() &&
+      fs.directory(p.join(path, 'refs')).existsSync();
 
   /// Opens a known git directory without searching.
   factory Repository.at(String gitDirectory, {String? workTree}) {
@@ -597,12 +597,12 @@ class Repository {
     // carrying it over is the difference between a rename and a delete
     // followed by a create. It is restored before the write below, so that
     // write's own entry appends to the history rather than starting a new one.
-    final log = File(Reflog.pathOf(gitDirectory, 'refs/heads/$from'));
+    final log = fs.file(Reflog.pathOf(gitDirectory, 'refs/heads/$from'));
     final carried = log.existsSync() ? log.readAsStringSync() : null;
 
     refs.delete('refs/heads/$from');
     if (carried != null) {
-      File(Reflog.pathOf(gitDirectory, 'refs/heads/$to'))
+      fs.file(Reflog.pathOf(gitDirectory, 'refs/heads/$to'))
         ..parent.createSync(recursive: true)
         ..writeAsStringSync(carried);
     }
@@ -633,7 +633,7 @@ class Repository {
 
   /// Moves a `[branch "from"]` section to `[branch "to"]`, keeping its lines.
   void _renameBranchConfig(String from, String to) {
-    final file = File(p.join(gitDirectory, 'config'));
+    final file = fs.file(p.join(gitDirectory, 'config'));
     if (!file.existsSync()) return;
 
     final wanted = '[branch "$from"]';
@@ -663,7 +663,7 @@ class Repository {
 
   /// Drops a `[branch "name"]` section, as deleting a branch should.
   void _removeBranchConfig(String name) {
-    final file = File(p.join(gitDirectory, 'config'));
+    final file = fs.file(p.join(gitDirectory, 'config'));
     if (!file.existsSync()) return;
 
     final kept = <String>[];
@@ -847,14 +847,15 @@ class Repository {
     if (commits.isEmpty) return 0;
 
     final bytes = CommitGraphWriter.build(commits);
-    final directory = Directory(p.join(gitDirectory, 'objects', 'info'))
+    final directory = fs.directory(p.join(gitDirectory, 'objects', 'info'))
       ..createSync(recursive: true);
     final path = p.join(directory.path, 'commit-graph');
 
     // The same lock-and-rename as everything else that must not be seen half
     // written — and a half-written cache is worse than none, because a reader
     // has no way to tell.
-    final temporary = File('$path.lock')..writeAsBytesSync(bytes, flush: true);
+    final temporary = fs.file('$path.lock')
+      ..writeAsBytesSync(bytes, flush: true);
     temporary.renameSync(path);
 
     reloadCommitGraph();
@@ -890,7 +891,7 @@ class Repository {
 
   /// Records that [branch] follows [ref] on [remote], as `--set-upstream` does.
   void setUpstream(String branch, String remote, String ref) {
-    final file = File(p.join(gitDirectory, 'config'));
+    final file = fs.file(p.join(gitDirectory, 'config'));
     final existing = file.existsSync() ? file.readAsStringSync() : '';
     final separator = existing.isEmpty || existing.endsWith('\n') ? '' : '\n';
     file.writeAsStringSync(
@@ -1011,7 +1012,7 @@ class Repository {
   /// resolving a conflict produces an ordinary commit and the merge is lost:
   /// the branch stays unmerged and the same conflict returns next time.
   ObjectId? get mergeHead {
-    final file = File(p.join(gitDirectory, 'MERGE_HEAD'));
+    final file = fs.file(p.join(gitDirectory, 'MERGE_HEAD'));
     if (!file.existsSync()) return null;
     final text = file.readAsStringSync().trim();
     if (text.isEmpty) return null;
@@ -1020,7 +1021,7 @@ class Repository {
 
   /// The message a conflicted merge prepared, from `MERGE_MSG`.
   String? get mergeMessage {
-    final file = File(p.join(gitDirectory, 'MERGE_MSG'));
+    final file = fs.file(p.join(gitDirectory, 'MERGE_MSG'));
     return file.existsSync() ? file.readAsStringSync() : null;
   }
 
@@ -1029,7 +1030,7 @@ class Repository {
   /// Forgets a merge in progress without touching the index or working tree.
   void clearMergeState() {
     for (final name in const ['MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE']) {
-      final file = File(p.join(gitDirectory, name));
+      final file = fs.file(p.join(gitDirectory, name));
       if (file.existsSync()) file.deleteSync();
     }
   }
@@ -1070,7 +1071,7 @@ class Repository {
     final entries = [...index.entries];
     final absolute = p.join(workTree, path.replaceAll('/', p.separator));
 
-    if (Directory(absolute).existsSync()) {
+    if (fs.directory(absolute).existsSync()) {
       for (final child in _pathsUnder(workTree, path)) {
         _stageOne(workTree, entries, child);
       }
@@ -1084,11 +1085,13 @@ class Repository {
   /// Every non-ignored, non-directory path under [directory], tracked or not.
   Iterable<String> _pathsUnder(String workTree, String directory) sync* {
     final rules = loadIgnoreRules(workTree, gitDirectory, config: config);
-    final root = Directory(p.join(workTree, directory.replaceAll('/', p.separator)));
+    final root = fs.directory(
+      p.join(workTree, directory.replaceAll('/', p.separator)),
+    );
     if (!root.existsSync()) return;
 
     for (final entry in root.listSync(recursive: true, followLinks: false)) {
-      if (entry is Directory) continue;
+      if (entry is GitFsDirectory) continue;
       final relative =
           p.relative(entry.path, from: workTree).replaceAll(r'\', '/');
       if (relative.startsWith('.git/')) continue;
@@ -1103,8 +1106,8 @@ class Repository {
       (e) => e.path == path && e.stage == MergeStage.ordinary,
     );
 
-    final link = Link(absolute);
-    final file = File(absolute);
+    final link = fs.link(absolute);
+    final file = fs.file(absolute);
 
     if (!file.existsSync() && !link.existsSync()) {
       // Staging a deletion: the entry goes, and so does any conflict stage,
@@ -1229,7 +1232,7 @@ class Repository {
     }
 
     final pattern = '/${path.replaceAll(r'\', '/')}${isDirectory ? '/' : ''}';
-    final file = File(p.join(workTree, '.gitignore'));
+    final file = fs.file(p.join(workTree, '.gitignore'));
 
     final existing = file.existsSync() ? file.readAsStringSync() : '';
     final lines = const LineSplitter().convert(existing);
@@ -1332,7 +1335,7 @@ class Repository {
   }
 
   ObjectId writeBlobFromFile(String path) =>
-      objects.write(Blob(File(path).readAsBytesSync()));
+      objects.write(Blob(fs.file(path).readAsBytesSync()));
 
   /// Writes a commit and moves the current branch to it — which is all that
   /// "committing" is: new objects, and one ref moved (`refs.doc`).
@@ -1450,12 +1453,12 @@ class Repository {
       p.join(gitDirectory, 'refs', 'heads'),
       p.join(gitDirectory, 'refs', 'tags'),
     ]) {
-      Directory(directory).createSync(recursive: true);
+      fs.directory(directory).createSync(recursive: true);
     }
 
-    File(p.join(gitDirectory, 'HEAD'))
+    fs.file(p.join(gitDirectory, 'HEAD'))
         .writeAsStringSync('ref: refs/heads/$defaultBranch\n');
-    File(p.join(gitDirectory, 'config')).writeAsStringSync(
+    fs.file(p.join(gitDirectory, 'config')).writeAsStringSync(
       '[core]\n'
       '\trepositoryformatversion = 0\n'
       '\tfilemode = false\n'

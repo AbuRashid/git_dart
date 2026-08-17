@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../fs/git_fs.dart';
+
 import 'package:path/path.dart' as p;
 
 /// A git config file, and the ones it inherits from.
@@ -69,7 +71,7 @@ class GitConfig {
       ...globalConfigPaths,
       p.join(gitDirectory, 'config'),
     ]) {
-      final file = File(path);
+      final file = fs.file(path);
       if (!file.existsSync()) continue;
       final parsed = GitConfig.parse(file.readAsStringSync());
       parsed._values.forEach((key, values) {

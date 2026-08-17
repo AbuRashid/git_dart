@@ -1,9 +1,9 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/tree.dart';
 
@@ -88,7 +88,7 @@ class IndexEntry {
   /// A cache, never a fact: a file changed within the same second and to the
   /// same length will match, which is why git also compares size and why
   /// `hazards` names trusting these fields (`index.the-stat-fields-are-a-cache`).
-  bool matchesStat(FileStat stat) {
+  bool matchesStat(GitFsStat stat) {
     final seconds = stat.modified.millisecondsSinceEpoch ~/ 1000;
     return seconds == mtimeSeconds && stat.size == size;
   }
@@ -124,7 +124,7 @@ class GitIndex {
         extensions = const {};
 
   static GitIndex? open(String path) {
-    final file = File(path);
+    final file = fs.file(path);
     // An index is absent in a bare repository and before the first `add`.
     if (!file.existsSync()) return null;
     return GitIndex.parse(file.readAsBytesSync());
@@ -327,11 +327,11 @@ class GitIndex {
     // The same lock-and-rename as a ref, for the same reason: a half-written
     // index is a lost staging area, and two writers renaming over each other
     // is a staging area that holds neither of their work.
-    final file = File(path);
-    final lock = File('$path$lockSuffix');
+    final file = fs.file(path);
+    final lock = fs.file('$path$lockSuffix');
     try {
       lock.createSync(exclusive: true);
-    } on FileSystemException {
+    } on GitFsException {
       throw IndexLockedException(path);
     }
     try {

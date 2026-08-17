@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'src/generated/tokens.dart';
@@ -5,9 +6,12 @@ import 'src/state.dart';
 import 'src/theme.dart';
 import 'src/ui/detail_pane.dart';
 import 'src/ui/tree_pane.dart';
+import 'src/ui/unsupported_platform.dart';
 
 void main() {
-  runApp(const GitExplorerApp());
+  // The web build compiles but has no filesystem to read a repository from, so
+  // it says as much rather than starting and failing at the first one.
+  runApp(kIsWeb ? const UnsupportedPlatformApp() : const GitExplorerApp());
 }
 
 class GitExplorerApp extends StatefulWidget {

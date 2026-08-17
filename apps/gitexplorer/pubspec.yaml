@@ -9,13 +9,14 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  file_picker: ^8.1.2
+  file_picker: ^12.0.0
   git_dart:
     path: ../../packages/git_dart
   path: ^1.9.0
   path_provider: ^2.1.4
 
 dev_dependencies:
+  flutter_launcher_icons: ^0.14.4
   flutter_lints: ^4.0.0
   flutter_test:
     sdk: flutter
@@ -25,3 +26,24 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # Linux has no launcher-icon convention of its own; the runner loads this
+    # one out of the bundle and hands it to GTK.
+    - assets/icon/app_icon_rounded.png
+
+# Masters are drawn by tool/generate_icon.py. After changing them, run
+# `dart run flutter_launcher_icons` to refresh the per-platform icons.
+flutter_launcher_icons:
+  image_path: assets/icon/app_icon.png
+  android: true
+  adaptive_icon_background: "#1A2130"
+  adaptive_icon_foreground: assets/icon/app_icon_foreground.png
+  ios: true
+  remove_alpha_ios: true
+  macos:
+    generate: true
+    image_path: assets/icon/app_icon_macos.png
+  # Windows and Linux are handled by tool/generate_icon.py: it writes a
+  # multi-resolution .ico, which this package does not.
+  windows:
+    generate: false

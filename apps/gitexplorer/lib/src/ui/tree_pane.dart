@@ -111,7 +111,7 @@ class ThemeButton extends StatelessWidget {
 /// that, rather than being added as a row that can only report a failure
 /// (`initialising.why`).
 Future<void> addRepository(BuildContext context, ExplorerState state) async {
-  final picked = await FilePicker.platform.getDirectoryPath(
+  final picked = await FilePicker.getDirectoryPath(
     dialogTitle: 'Choose a repository',
   );
   if (picked == null) return;

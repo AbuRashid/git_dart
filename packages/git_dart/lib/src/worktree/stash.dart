@@ -1,7 +1,7 @@
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../index/git_index.dart';
 import '../merge/merge.dart';
 import '../object_id.dart';
@@ -109,7 +109,7 @@ ObjectId? stashSave(
     final entries = <TreeEntry>[];
     final flat = <String, TreeEntry>{};
     for (final path in untracked) {
-      final file = File(p.join(workTree, path.replaceAll('/', p.separator)));
+      final file = fs.file(p.join(workTree, path.replaceAll('/', p.separator)));
       if (!file.existsSync()) continue;
       final blob = Blob(file.readAsBytesSync());
       repository.objects.write(blob);
@@ -144,15 +144,15 @@ ObjectId? stashSave(
   // The reflog is the stack, so the ref must be logged even though it is not
   // a branch. It already would be by name, and this makes it explicit.
   final logPath = Reflog.pathOf(repository.gitDirectory, 'refs/stash');
-  File(logPath).parent.createSync(recursive: true);
-  if (!File(logPath).existsSync()) File(logPath).createSync();
+  fs.file(logPath).parent.createSync(recursive: true);
+  if (!fs.file(logPath).existsSync()) fs.file(logPath).createSync();
   repository.refs.write('refs/stash', stash, reflogMessage: text);
 
   // ---- put the working tree back ----
   reset(repository, head, mode: ResetMode.hard);
   if (includeUntracked) {
     for (final path in untracked) {
-      final file = File(p.join(workTree, path.replaceAll('/', p.separator)));
+      final file = fs.file(p.join(workTree, path.replaceAll('/', p.separator)));
       if (file.existsSync()) file.deleteSync();
     }
   }
@@ -270,17 +270,17 @@ void stashDrop(Repository repository, {int index = 0}) {
   final path = Reflog.pathOf(repository.gitDirectory, 'refs/stash');
   if (lines.isEmpty) {
     repository.refs.delete('refs/stash');
-    final file = File(path);
+    final file = fs.file(path);
     if (file.existsSync()) file.deleteSync();
     return;
   }
 
-  File(path).writeAsStringSync(lines.map((e) => e.line).join());
+  fs.file(path).writeAsStringSync(lines.map((e) => e.line).join());
   // The ref names the top of the stack, which has just changed if the top is
   // what went.
   final top = lines.last.to;
   if (repository.refs.resolve('refs/stash') != top) {
-    File(p.join(repository.gitDirectory, 'refs', 'stash'))
+    fs.file(p.join(repository.gitDirectory, 'refs', 'stash'))
         .writeAsStringSync('${top.hex}\n');
   }
 }
@@ -289,7 +289,7 @@ void stashDrop(Repository repository, {int index = 0}) {
 void stashClear(Repository repository) {
   repository.refs.delete('refs/stash');
   final file =
-      File(Reflog.pathOf(repository.gitDirectory, 'refs/stash'));
+      fs.file(Reflog.pathOf(repository.gitDirectory, 'refs/stash'));
   if (file.existsSync()) file.deleteSync();
 }
 
@@ -303,7 +303,7 @@ ObjectId _treeOfWorkingState(Repository repository, String workTree) {
   for (final entry in index.entries) {
     if (entry.stage != MergeStage.ordinary) continue;
     final file =
-        File(p.join(workTree, entry.path.replaceAll('/', p.separator)));
+        fs.file(p.join(workTree, entry.path.replaceAll('/', p.separator)));
 
     if (!file.existsSync()) continue; // deleted: left out of the tree
     final blob = Blob(file.readAsBytesSync());
@@ -391,7 +391,7 @@ void _restoreUntracked(
         continue;
       }
       final file =
-          File(p.join(workTree, path.replaceAll('/', p.separator)))
+          fs.file(p.join(workTree, path.replaceAll('/', p.separator)))
             ..parent.createSync(recursive: true);
       file.writeAsBytesSync(
         repository.objects.readTyped<Blob>(entry.id).content,

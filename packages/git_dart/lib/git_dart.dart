@@ -14,6 +14,10 @@ export 'src/config/config_writer.dart';
 export 'src/config/git_config.dart';
 export 'src/diff/text_diff.dart';
 export 'src/diff/tree_diff.dart';
+// The `fs` getter stays internal: it is how this package reaches the
+// filesystem, not something an importer should find in its own namespace.
+export 'src/fs/git_fs.dart' hide fs;
+export 'src/fs/io_git_fs.dart';
 export 'src/graph/commit_graph.dart';
 export 'src/graph/graph_walks.dart';
 export 'src/index/git_index.dart';

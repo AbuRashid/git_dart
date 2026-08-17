@@ -1,8 +1,8 @@
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
+import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/git_object.dart';
 import 'loose_object_store.dart';
@@ -120,8 +120,8 @@ class ObjectStore {
       _install(
         objects: objects,
         packChecksum: packChecksum,
-        place: (destination) =>
-            File('$destination.tmp')..writeAsBytesSync(packBytes, flush: true),
+        place: (destination) => fs.file('$destination.tmp')
+          ..writeAsBytesSync(packBytes, flush: true),
       );
 
   /// Stores a packfile that is already on disk, moving it into place rather
@@ -138,7 +138,7 @@ class ObjectStore {
       _install(
         objects: objects,
         packChecksum: packChecksum,
-        place: (_) => File(packPath),
+        place: (_) => fs.file(packPath),
       );
 
   /// Writes the index, puts the pack beside it, and opens the pair.
@@ -149,11 +149,11 @@ class ObjectStore {
   String? _install({
     required List<PackedObject> objects,
     required ObjectId packChecksum,
-    required File Function(String destination) place,
+    required GitFsFile Function(String destination) place,
   }) {
     if (objects.isEmpty) return null;
 
-    final directory = Directory(p.join(loose.objectsDirectory, 'pack'))
+    final directory = fs.directory(p.join(loose.objectsDirectory, 'pack'))
       ..createSync(recursive: true);
     final name = PackIndexWriter.packName(objects.map((o) => o.id));
     final packPath = p.join(directory.path, '$name.pack');
@@ -162,7 +162,7 @@ class ObjectStore {
     // Already here: the name is a hash of the object set, so an identical set
     // has been stored before and rewriting it would only risk truncating a
     // pack something else is reading.
-    if (File(packPath).existsSync() && File(indexPath).existsSync()) {
+    if (fs.file(packPath).existsSync() && fs.file(indexPath).existsSync()) {
       return packPath;
     }
 
@@ -170,7 +170,7 @@ class ObjectStore {
     // A reader skips a pack with no index, so the window where the pair is
     // incomplete is a window where neither is used, rather than one where a
     // pack is read with an index that does not describe it.
-    File(indexPath).writeAsBytesSync(
+    fs.file(indexPath).writeAsBytesSync(
       PackIndexWriter.build(objects: objects, packChecksum: packChecksum),
       flush: true,
     );
