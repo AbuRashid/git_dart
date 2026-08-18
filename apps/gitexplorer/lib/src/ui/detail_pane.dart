@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:syntax_dart/syntax_dart.dart';
 
 import '../generated/tokens.dart';
 import '../models.dart';
 import '../state.dart';
 import '../theme.dart';
+import 'code_view.dart';
 import 'settings_page.dart';
 
 /// What is selected, shown in full.
@@ -1600,7 +1602,7 @@ class _FileDetailState extends State<_FileDetail> {
   /// that can be acted on (`editing.a-changed-file-opens-on-the-file`).
   bool _showDiff = false;
 
-  final _editor = TextEditingController();
+  final _editor = HighlightingEditingController();
   final _editorFocus = FocusNode();
 
   /// What the controller was last filled from, so it is not refilled — and the
@@ -1618,6 +1620,9 @@ class _FileDetailState extends State<_FileDetail> {
     final draft = widget.state.draftFor(widget.repositoryPath, widget.path);
     final wanted = draft ?? content.text ?? '';
     final key = '${widget.repositoryPath} ${widget.path}';
+    // One controller serves every file the pane opens, so the grammar is set
+    // here rather than at construction.
+    _editor.grammar = grammarForPath(widget.path);
     if (_filledFor == key && _editor.text == wanted) return;
     if (_filledFor == key && draft != null && _editor.text == draft) return;
     _filledFor = key;
@@ -1708,7 +1713,9 @@ class _FileDetailState extends State<_FileDetail> {
             ),
           )
         else
-          Expanded(child: _TextView(text: content.text ?? '')),
+          Expanded(
+            child: _TextView(path: widget.path, text: content.text ?? ''),
+          ),
       ],
     );
   }
@@ -1722,9 +1729,10 @@ String _size(int bytes) {
 
 /// The file, editable.
 ///
-/// A plain text field rather than a code editor: this is for fixing a typo and
-/// adding a line, and pretending otherwise would promise highlighting, folding
-/// and completion that are not here.
+/// A text field rather than a code editor: this is for fixing a typo and
+/// adding a line, and there is no folding, no completion and no navigation
+/// here. It is coloured, though, because the alternative was pressing edit and
+/// watching the colours leave (`editing.the-editor-is-coloured-like-the-viewer`).
 class _Editor extends StatelessWidget {
   final TextEditingController controller;
   final FocusNode focusNode;
@@ -1766,34 +1774,79 @@ class _Editor extends StatelessWidget {
   }
 }
 
-class _TextView extends StatelessWidget {
+class _TextView extends StatefulWidget {
+  /// What the file is called, which is how its type is known
+  /// (`presentation.syntax-colour`).
+  final String path;
   final String text;
-  const _TextView({required this.text});
+
+  const _TextView({required this.path, required this.text});
+
+  @override
+  State<_TextView> createState() => _TextViewState();
+}
+
+class _TextViewState extends State<_TextView> {
+  late List<String> _lines;
+  late CodeHighlighter _highlighter;
+
+  @override
+  void initState() {
+    super.initState();
+    _prepare();
+  }
+
+  @override
+  void didUpdateWidget(_TextView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Scanning the file is the expensive half, and it belongs to the file
+    // rather than to the frame.
+    if (oldWidget.text != widget.text || oldWidget.path != widget.path) {
+      _prepare();
+    }
+  }
+
+  void _prepare() {
+    _lines = widget.text.split('\n');
+    _highlighter = CodeHighlighter(widget.path, _lines);
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final lines = text.split('\n');
     final mono = monospaceStyle(context);
+    final palette = SyntaxPalette.of(context);
 
     return ListView.builder(
       padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: lines.length,
-      itemBuilder: (context, index) => Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 56,
-            child: Text(
-              '${index + 1}',
-              textAlign: TextAlign.right,
-              style: mono.copyWith(color: theme.colorScheme.onSurfaceVariant),
+      itemCount: _lines.length,
+      itemBuilder: (context, index) {
+        final line = _lines[index];
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 56,
+              child: Text(
+                '${index + 1}',
+                textAlign: TextAlign.right,
+                style: mono.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(child: Text(lines[index], style: mono)),
-        ],
-      ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text.rich(
+                codeSpan(
+                  line,
+                  _highlighter.tokensFor(index, line),
+                  mono,
+                  palette,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -1815,9 +1868,12 @@ class _DiffView extends StatelessWidget {
 
     final added = statusColor(FileState.added, context)!;
     final removed = statusColor(FileState.deleted, context)!;
+    final palette = SyntaxPalette.of(context);
+    final highlighter = DiffHighlighter(diff.path);
 
     final rows = <Widget>[];
     for (final hunk in diff.hunks) {
+      highlighter.startHunk();
       rows.add(Container(
         width: double.infinity,
         color: theme.colorScheme.surfaceContainerHighest,
@@ -1867,8 +1923,19 @@ class _DiffView extends StatelessWidget {
               const SizedBox(width: 12),
               Text(line.marker, style: mono.copyWith(color: color)),
               const SizedBox(width: 4),
+              // The text carries its own colours; what makes the line added or
+              // removed is the marker and the wash behind it. Colouring both
+              // would mean choosing between saying what the line is and saying
+              // what happened to it, and the marker says the second on its own.
               Expanded(
-                child: Text(line.text, style: mono.copyWith(color: color)),
+                child: Text.rich(
+                  codeSpan(
+                    line.text,
+                    highlighter.tokensFor(line),
+                    mono,
+                    palette,
+                  ),
+                ),
               ),
             ],
           ),

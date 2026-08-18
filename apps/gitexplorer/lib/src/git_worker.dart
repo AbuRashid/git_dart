@@ -192,6 +192,28 @@ class RemoveRemote extends GitRequest {
   const RemoveRemote(this.repositoryPath, this.name);
 }
 
+/// Copies a remote repository into a new folder.
+class CloneRepository extends GitRequest {
+  final String url;
+
+  /// Where the working tree goes: a folder that does not exist yet, or an
+  /// empty one.
+  final String path;
+
+  /// Supplied after the user was asked; null means "use whatever is saved".
+  final String? username;
+  final String? password;
+  final bool remember;
+
+  const CloneRepository(
+    this.url,
+    this.path, {
+    this.username,
+    this.password,
+    this.remember = false,
+  });
+}
+
 class FetchRemote extends GitRequest {
   final String repositoryPath;
   final String name;
@@ -347,6 +369,7 @@ class _Worker {
         LoadRemotes() => _remotes(request),
         AddRemote() => _addRemote(request),
         RemoveRemote() => _removeRemote(request),
+        CloneRepository() => _clone(request),
         FetchRemote() => _fetch(request),
         PushRemote() => _push(request),
         PullRemote() => _pull(request),
@@ -618,6 +641,50 @@ class _Worker {
       return git.Credentials(username: username, password: password);
     }
     return _credentials.lookup(url);
+  }
+
+  /// Clones, reporting the same way a fetch does.
+  ///
+  /// A clone is the one network operation with no repository to ask about
+  /// first, so the credentials are looked up against the URL itself.
+  Future<CloneOutcome> _clone(CloneRepository request) async {
+    final credentials = await _credentialsFor(
+      request.url,
+      request.username,
+      request.password,
+    );
+
+    try {
+      final result = await git.clone(
+        request.url,
+        request.path,
+        credentials: credentials,
+      );
+      if (credentials != null && request.remember) {
+        await _credentials.save(request.url, credentials);
+      }
+      return CloneOutcome(
+        path: result.path,
+        branch: result.branchName,
+        objectsReceived: result.objectsReceived,
+        remoteWasEmpty: result.remoteWasEmpty,
+      );
+    } on git.AuthenticationRequired catch (needed) {
+      if (needed.wereRejected && credentials != null) {
+        await _credentials.discard(request.url, credentials);
+      }
+      return CloneOutcome(
+        needsCredentials: true,
+        wereRejected: needed.wereRejected,
+        username: credentials?.username ?? _usernameIn(request.url),
+        canSave: await _credentials.canSave(),
+        error: needed.toString(),
+      );
+    } catch (error) {
+      // A URL that is wrong, a host that is down, a folder that is taken: all
+      // are answers to give the user rather than crashes.
+      return CloneOutcome(error: '$error');
+    }
   }
 
   Future<FetchOutcome> _fetch(FetchRemote request) async {
@@ -1466,6 +1533,21 @@ class GitService {
 
   Future<List<RemoteData>> removeRemote(String repository, String name) =>
       _ask(RemoveRemote(repository, name));
+
+  Future<CloneOutcome> cloneRepository(
+    String url,
+    String path, {
+    String? username,
+    String? password,
+    bool remember = false,
+  }) =>
+      _ask(CloneRepository(
+        url,
+        path,
+        username: username,
+        password: password,
+        remember: remember,
+      ));
 
   Future<FetchOutcome> fetchRemote(
     String repository,

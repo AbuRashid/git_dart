@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:syntax_dart/syntax_dart.dart';
 
 import 'generated/tokens.dart';
 
@@ -126,3 +127,34 @@ TextStyle monospaceStyle(BuildContext context) =>
           ],
           height: 1.4,
         );
+
+/// The colour a run of code is drawn in (`presentation.syntax-colour`).
+///
+/// Taken from Material's swatches for the current brightness, as the status
+/// letters are: the scheme has semantic roles for surfaces and for emphasis,
+/// and no opinion at all about how a string should differ from a comment.
+///
+/// Null means "no colour of its own" — ordinary code, which reads in the same
+/// ink as the rest of the pane. Returning null rather than `onSurface` keeps
+/// the caller from having to know that they are the same thing.
+Color? syntaxColor(TokenKind kind, BuildContext context) {
+  final theme = Theme.of(context);
+  final dark = theme.brightness == Brightness.dark;
+
+  Color shade(MaterialColor swatch) => dark ? swatch.shade300 : swatch.shade700;
+
+  return switch (kind) {
+    TokenKind.plain => null,
+    TokenKind.comment => theme.colorScheme.onSurfaceVariant,
+    TokenKind.string => shade(Colors.green),
+    TokenKind.number => shade(Colors.orange),
+    TokenKind.keyword => shade(Colors.purple),
+    TokenKind.name => shade(Colors.teal),
+    TokenKind.meta => shade(Colors.blue),
+    // Structure should recede so that content comes forward, which means
+    // dimmer than plain code rather than a colour of its own.
+    TokenKind.punctuation => theme.colorScheme.onSurfaceVariant.withValues(
+        alpha: 0.7,
+      ),
+  };
+}

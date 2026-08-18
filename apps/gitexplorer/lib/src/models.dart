@@ -248,6 +248,45 @@ class PushOutcome {
 }
 
 /// What a fetch did.
+/// What a clone did, or why it did not.
+///
+/// Credentials are asked for the same way a fetch asks: a clone is a fetch
+/// with a repository made for it, and a server that wants a token wants one at
+/// the same point.
+class CloneOutcome {
+  /// Where the repository was put. Null when nothing was made.
+  final String? path;
+
+  /// The branch checked out, short-named.
+  final String? branch;
+
+  final int objectsReceived;
+
+  /// True when the remote had no refs, so the clone is an empty repository.
+  final bool remoteWasEmpty;
+
+  final bool needsCredentials;
+  final bool wereRejected;
+  final String? username;
+  final bool canSave;
+
+  final String? error;
+
+  const CloneOutcome({
+    this.path,
+    this.branch,
+    this.objectsReceived = 0,
+    this.remoteWasEmpty = false,
+    this.needsCredentials = false,
+    this.wereRejected = false,
+    this.username,
+    this.canSave = false,
+    this.error,
+  });
+
+  bool get succeeded => path != null && error == null && !needsCredentials;
+}
+
 class FetchOutcome {
   final String remote;
   final int objectsReceived;

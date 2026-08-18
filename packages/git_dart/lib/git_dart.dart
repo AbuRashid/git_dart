@@ -45,6 +45,7 @@ export 'src/storage/pack_indexer.dart';
 export 'src/storage/pack_parser.dart';
 export 'src/storage/repack.dart';
 export 'src/storage/pack_writer.dart';
+export 'src/transfer/clone.dart';
 export 'src/transfer/connection.dart';
 export 'src/transfer/credentials.dart';
 export 'src/transfer/fetch.dart';

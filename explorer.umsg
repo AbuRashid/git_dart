@@ -113,6 +113,42 @@ gitexplorer @apps/gitexplorer/v0 {
                                  is how a staging area becomes confusing."
 
   -- ===================================================================
+  -- GETTING A REPOSITORY FROM SOMEWHERE ELSE
+  -- ===================================================================
+
+  cloning {
+    what "A repository can be copied from a URL into a folder the user chooses,
+          and what arrives is added to the list. The two ways in sit together:
+          a repository is either one they already have or one they are about to
+          get, and both end as a row in the same tree."
+
+    the-folder-is-named-not-assumed "The URL suggests the folder's name, and the
+         suggestion stops as soon as the name is typed in. Deriving it silently
+         would be right almost always and infuriating the rest of the time,
+         since the name a repository calls itself is not always what someone
+         wants the folder on their disk called."
+
+    where-it-went "The whole destination path is shown before the clone starts.
+         `git clone` is answered afterwards by looking at the shell's working
+         directory; there is no working directory here, so the question has to
+         be answered in advance."
+
+    credentials "A server that wants a token wants it at the same point a fetch
+         would, so it is asked for the same way and the clone is run again with
+         what was given. There is no repository to look the secret up against
+         yet, so it is looked up against the URL."
+
+    an-empty-remote-is-not-a-failure "Cloning a repository with no commits in it
+         leaves a repository with no commits in it, which is what git does and
+         what the user asked for. It is reported rather than treated as an
+         error."
+
+    nothing-half-written "A clone that fails removes what it made. A directory
+         holding half a repository looks like a repository until it is opened,
+         and the user would be left to tell the difference."
+  }
+
+  -- ===================================================================
   -- A FOLDER THAT HOLDS NO REPOSITORY
   -- ===================================================================
 
@@ -249,6 +285,13 @@ gitexplorer @apps/gitexplorer/v0 {
          that the file can be acted on, it opens on the file and the diff is one
          click away — showing the diff first would put a reader one click from
          the only thing they can change, every time."
+
+    the-editor-is-coloured-like-the-viewer "The editor draws the file the same
+         way the viewer does. It was a plain field first, on the argument that
+         colouring it would promise folding and completion that are not there;
+         what it promised instead was that pressing edit throws the colours
+         away, which reads as the editor being a lesser view of the file rather
+         than the same file with a caret in it."
 
     a-stale-write-is-refused "A save carries the size and timestamp the file had
          when it was opened, and is refused when they no longer match. Something
@@ -387,6 +430,21 @@ gitexplorer @apps/gitexplorer/v0 {
          other, which is the one thing Material's scheme does not decide. They
          are taken from Material's own swatches, chosen for the current
          brightness, rather than from values invented here."
+
+    syntax-colour "A file of a known type is drawn with its syntax coloured. A
+         file of an unknown type is drawn plain, which is the only honest
+         alternative to drawing it wrong.
+
+         Eight kinds are distinguished and no more, because a palette a reader
+         cannot hold in their head is decoration rather than information. The
+         colours are taken from Material's swatches for the current brightness,
+         as the status letters are and for the same reason: this is the other
+         thing Material's scheme has no opinion about.
+
+         The tokeniser is a package of its own. Knowing how Dart or unimsg is
+         spelled is not something a file explorer should contain, and a
+         highlighter that cannot be used by anything but this window is a
+         highlighter nobody will fix."
   }
   -- ===================================================================
   -- CONCURRENCY

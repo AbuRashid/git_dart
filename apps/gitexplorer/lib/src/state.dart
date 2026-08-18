@@ -644,6 +644,46 @@ class ExplorerState extends ChangeNotifier {
     await _refreshSummary(repository);
   }
 
+  /// The URL being cloned, while one is running.
+  String? _cloning;
+
+  String? get cloning => _cloning;
+
+  /// Clones [url] into [path], and adds what arrives.
+  ///
+  /// The clone puts a repository somewhere the user chose, so adding it to the
+  /// tree afterwards is the whole point rather than a separate step. Needing
+  /// credentials is a question and leaves the tree alone; the caller asks and
+  /// calls again.
+  Future<CloneOutcome?> cloneRepository(
+    String url,
+    String path, {
+    String? username,
+    String? password,
+    bool remember = false,
+  }) async {
+    _cloning = url;
+    notifyListeners();
+    try {
+      final outcome = await _git.cloneRepository(
+        url,
+        path,
+        username: username,
+        password: password,
+        remember: remember,
+      );
+      _error = outcome.needsCredentials ? null : outcome.error;
+      if (outcome.succeeded) await addRepository(outcome.path!);
+      return outcome;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      return null;
+    } finally {
+      _cloning = null;
+      notifyListeners();
+    }
+  }
+
   /// Looks at a folder without adding it.
   ///
   /// The caller asks first, so that a folder holding no repository is offered

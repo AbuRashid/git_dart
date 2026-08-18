@@ -197,6 +197,38 @@ void main() {
       );
     });
 
+    test('cloning copies a repository and adds what arrived', () async {
+      final into = p.join(scratch.path, 'cloned');
+      final outcome = await service.cloneRepository(repoPath, into);
+
+      expect(outcome.error, isNull);
+      expect(outcome.succeeded, isTrue);
+      expect(outcome.branch, 'main');
+      expect(outcome.remoteWasEmpty, isFalse);
+
+      // The clone is a repository this application can open, on the same
+      // commit as the one it was taken from.
+      final summary = await service.open(into, 'cloned');
+      expect(summary.available, isTrue);
+      expect(summary.headId, git(['rev-parse', 'HEAD']).trim());
+      expect(File(p.join(into, 'a.txt')).existsSync(), isTrue);
+    });
+
+    test('cloning into a folder with something in it is reported, not thrown',
+        () async {
+      final into = p.join(scratch.path, 'occupied');
+      Directory(into).createSync();
+      File(p.join(into, 'mine.txt')).writeAsStringSync('keep\n');
+
+      final outcome = await service.cloneRepository(repoPath, into);
+
+      expect(outcome.succeeded, isFalse);
+      expect(outcome.error, isNotNull);
+      expect(outcome.path, isNull);
+      // Refused without touching what was there.
+      expect(File(p.join(into, 'mine.txt')).readAsStringSync(), 'keep\n');
+    });
+
     test('a folder holding no repository offers to become one', () async {
       final plain = Directory(p.join(scratch.path, 'plain'))
         ..createSync(recursive: true);

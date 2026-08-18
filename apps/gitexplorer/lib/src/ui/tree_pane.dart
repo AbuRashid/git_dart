@@ -6,6 +6,7 @@ import '../models.dart';
 import '../state.dart';
 import '../storage_access.dart';
 import '../theme.dart';
+import 'clone_dialog.dart';
 
 /// The virtual root and everything opened under it.
 ///
@@ -38,16 +39,36 @@ class TreePane extends StatelessWidget {
                 ),
               ),
               const Spacer(),
-              IconButton.filledTonal(
-                icon: const Icon(Icons.add),
-                tooltip: 'Add a repository',
-                visualDensity: VisualDensity.compact,
-                onPressed: () => addRepository(context, state),
+              MenuAnchor(
+                menuChildren: [
+                  MenuItemButton(
+                    leadingIcon: const Icon(Icons.folder_open),
+                    onPressed: () => addRepository(context, state),
+                    child: const Text('Add a folder I have'),
+                  ),
+                  MenuItemButton(
+                    leadingIcon: const Icon(Icons.cloud_download_outlined),
+                    onPressed: () => cloneRepository(context, state),
+                    child: const Text('Clone from a URL'),
+                  ),
+                ],
+                builder: (context, controller, _) => IconButton.filledTonal(
+                  icon: const Icon(Icons.add),
+                  tooltip: 'Add a repository',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () =>
+                      controller.isOpen ? controller.close() : controller.open(),
+                ),
               ),
             ],
           ),
         ),
-        const Divider(height: 1),
+        // A clone is the one thing here that takes long enough to need saying
+        // so, and it has no row of its own to say it in yet.
+        if (state.cloning case final url?)
+          _Cloning(url: url)
+        else
+          const Divider(height: 1),
         Expanded(
           child: rows.isEmpty
               ? _EmptyRoot(state: state)
@@ -118,7 +139,7 @@ class ThemeButton extends StatelessWidget {
 /// that, rather than being added as a row that can only report a failure
 /// (`initialising.why`).
 Future<void> addRepository(BuildContext context, ExplorerState state) async {
-  if (!await _ensureStorageAccess(context)) return;
+  if (!await ensureStorageAccess(context)) return;
 
   final picked = await FilePicker.getDirectoryPath(
     dialogTitle: 'Choose a repository',
@@ -178,13 +199,13 @@ Future<void> addRepository(BuildContext context, ExplorerState state) async {
   if (create ?? false) await state.initialiseRepository(picked);
 }
 
-/// Makes sure the app may read the files in whatever folder is picked next.
+/// Makes sure the app may read and write the folder picked next.
 ///
 /// Asked before the picker rather than after, because the failure it prevents is
 /// a silent one: without access the folder still opens and `.git` is still
 /// written, and only the files — the whole point — are missing. Explaining that
 /// afterwards means explaining an empty list.
-Future<bool> _ensureStorageAccess(BuildContext context) async {
+Future<bool> ensureStorageAccess(BuildContext context) async {
   if (await hasStorageAccess()) return true;
   if (!context.mounted) return false;
 
@@ -269,9 +290,54 @@ class _EmptyRoot extends StatelessWidget {
               icon: const Icon(Icons.add),
               label: const Text('Add a repository'),
             ),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: () => cloneRepository(context, state),
+              icon: const Icon(Icons.cloud_download_outlined),
+              label: const Text('Clone from a URL'),
+            ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The strip that says a clone is happening, in the divider's place.
+class _Cloning extends StatelessWidget {
+  final String url;
+
+  const _Cloning({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Cloning $url',
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+      ],
     );
   }
 }

@@ -952,4 +952,140 @@ void main() {
     // genuinely is.
     expect(find.byIcon(Icons.error_outline), findsWidgets);
   });
+
+  group('cloning', () {
+    testWidgets('the add button offers both ways to get a repository',
+        (tester) async {
+      await pumpExplorer(tester);
+
+      await tester.tap(find.byTooltip('Add a repository'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Add a folder I have'), findsOneWidget);
+      expect(find.text('Clone from a URL'), findsOneWidget);
+    });
+
+    testWidgets('the clone dialog asks for a URL and where to put it',
+        (tester) async {
+      await pumpExplorer(tester);
+
+      await tester.tap(find.byTooltip('Add a repository'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Clone from a URL'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Clone a repository'), findsOneWidget);
+      expect(find.widgetWithText(TextField, 'Repository URL'), findsOneWidget);
+      // Nowhere to put it yet, so there is nothing to press.
+      final clone = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Clone'),
+      );
+      expect(clone.onPressed, isNull);
+    });
+
+    testWidgets('the URL suggests the folder name, until one is typed',
+        (tester) async {
+      await pumpExplorer(tester);
+
+      await tester.tap(find.byTooltip('Add a repository'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Clone from a URL'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'Repository URL'),
+        'https://host/owner/thing.git',
+      );
+      await tester.pumpAndSettle();
+
+      final name = tester.widget<TextField>(
+        find.widgetWithText(TextField, 'Folder name'),
+      );
+      expect(name.controller!.text, 'thing');
+    });
+  });
+
+  group('syntax colour', () {
+    testWidgets('a file of a known type is drawn in more than one colour',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      // The read-only view, since a file at the working tree opens in the
+      // editor.
+      await act(tester, () => state.setRevision(repoPath, Revision.head));
+      await act(tester, () => state.selectFile(repoPath, 'lib/main.dart'));
+
+      final span = lineSpan(tester, 'void main() {}');
+      // Whatever the colours are, the line still says what it said.
+      expect(span.toPlainText(), 'void main() {}');
+
+      final coloured = colouredRuns(span);
+      expect(coloured.keys, contains('void'));
+      expect(coloured['void'], isNot(coloured['()']),
+          reason: 'a keyword and a bracket are not the same thing');
+    });
+
+    testWidgets('the editor is coloured, and only for a type it knows',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      await act(tester, () => state.selectFile(repoPath, 'lib/main.dart'));
+
+      final dart = editorSpan(tester);
+      expect(dart.toPlainText(), 'void main() {}\n');
+      expect(colouredRuns(dart).keys, contains('void'));
+
+      // `.txt` has no grammar, and a file drawn wrong would be worse than a
+      // file drawn plain.
+      await act(tester, () => state.selectFile(repoPath, 'scratch.txt'));
+      expect(colouredRuns(editorSpan(tester)), isEmpty);
+    });
+
+    testWidgets('a diff is coloured, without losing which side a line is on',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      await act(tester, () => state.selectFile(repoPath, 'README.md'));
+      await tester.tap(find.text('Diff'));
+      await tester.pump();
+
+      // A Markdown heading, on a context line, coloured as a heading.
+      expect(colouredRuns(lineSpan(tester, '# demo')).keys,
+          contains('# demo'));
+      // The added line is prose, so it has no colour of its own; that it was
+      // added is still said by the marker beside it.
+      expect(colouredRuns(lineSpan(tester, 'changed')), isEmpty);
+      expect(find.text('+'), findsOneWidget);
+    });
+  });
+}
+
+/// The span behind a line, whether it was drawn as rich text or as plain.
+InlineSpan lineSpan(WidgetTester tester, String text) {
+  final widget = tester.widget<Text>(find.text(text));
+  return widget.textSpan ?? TextSpan(text: widget.data);
+}
+
+/// The same, for whatever the editor is currently holding.
+InlineSpan editorSpan(WidgetTester tester) {
+  final field = find.byType(TextField);
+  return tester.widget<TextField>(field).controller!.buildTextSpan(
+        context: tester.element(field),
+        style: const TextStyle(),
+        withComposing: false,
+      );
+}
+
+/// Every run of [span] that carries a colour of its own, by its text.
+///
+/// A run with no colour inherits the pane's, which is what ordinary code
+/// should do, so its absence here is the assertion worth making.
+Map<String, Color> colouredRuns(InlineSpan span) {
+  final runs = <String, Color>{};
+  span.visitChildren((child) {
+    if (child is TextSpan) {
+      final colour = child.style?.color;
+      final text = child.text;
+      if (colour != null && text != null) runs[text] = colour;
+    }
+    return true;
+  });
+  return runs;
 }

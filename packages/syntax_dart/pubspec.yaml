@@ -1,0 +1,13 @@
+name: syntax_dart
+description: >-
+  A line-at-a-time syntax tokeniser. Pure Dart with no dependencies, so the
+  same grammars serve a Flutter view, a terminal pager and a static site.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.0.0
+
+dev_dependencies:
+  lints: ^4.0.0
+  test: ^1.25.0
