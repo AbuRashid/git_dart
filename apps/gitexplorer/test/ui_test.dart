@@ -25,6 +25,7 @@ import 'package:gitexplorer/src/state.dart';
 import 'package:gitexplorer/src/theme.dart';
 import 'package:gitexplorer/src/ui/tree_pane.dart';
 import 'package:path/path.dart' as p;
+import 'package:unimsg_view/unimsg_view.dart';
 
 late Directory scratch;
 late String repoPath;
@@ -1002,6 +1003,105 @@ void main() {
         find.widgetWithText(TextField, 'Folder name'),
       );
       expect(name.controller!.text, 'thing');
+    });
+  });
+
+  group('documents', () {
+    const spec = '%unimsg 0\n'
+        '\n'
+        '-- The demo, described as something you could build.\n'
+        '\n'
+        'demo {\n'
+        '  -- ==========\n'
+        '  -- THE HEADING\n'
+        '  -- ==========\n'
+        '  presentation { doc "why", status :provisional }\n'
+        '  editing { what "x" }\n'
+        '}\n';
+
+    testWidgets('a .umsg file opens as a document, with the source across',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      write('spec.umsg', spec);
+      await act(tester, () => state.refresh(repoPath));
+      await act(tester, () => state.selectFile(repoPath, 'spec.umsg'));
+
+      // Opened as a document (`presentation.a-document-opens-as-a-document`).
+      expect(find.byType(UnimsgDocumentView), findsOneWidget);
+      // Once in the contents, once as the heading it leads to.
+      expect(find.text('presentation'), findsNWidgets(2));
+      // The author's banner, kept as their name for the section.
+      expect(find.text('the heading'), findsOneWidget);
+      // A symbol is still a symbol, sigil and all.
+      expect(find.text(':provisional'), findsOneWidget);
+      // The block at the top of the file, which says what the file is.
+      expect(
+        find.textContaining('described as something you could build'),
+        findsOneWidget,
+      );
+      // Not the editor, until asked for.
+      expect(find.byType(TextField), findsNothing);
+
+      await tester.tap(find.text('File'));
+      await tester.pumpAndSettle();
+      expect(find.byType(UnimsgDocumentView), findsNothing);
+      expect(find.byType(TextField), findsOneWidget);
+    });
+
+    testWidgets('a document being typed into says where it stopped parsing',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      write('broken.umsg', spec);
+      await act(tester, () => state.refresh(repoPath));
+      await act(tester, () => state.selectFile(repoPath, 'broken.umsg'));
+      expect(find.byType(UnimsgDocumentView), findsOneWidget);
+
+      // Half-way through an edit is an ordinary state, not a failure.
+      await tester.tap(find.text('File'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '%unimsg 0\ndemo { a\n');
+      await act(tester, () async {});
+      await tester.tap(find.text('Document'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Not a document yet'), findsOneWidget);
+      // Where, not just that: the position is the one thing the author needs.
+      expect(find.textContaining('line 2, column 9'), findsOneWidget);
+      expect(find.textContaining('expected a value'), findsOneWidget);
+      // No stale page: one that silently lags the file is worse than none.
+      expect(find.byType(UnimsgDocumentView), findsNothing);
+
+      state.discardDraft(repoPath, 'broken.umsg');
+    });
+
+    testWidgets('the page follows the draft rather than the saved file',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+      write('draft.umsg', spec);
+      await act(tester, () => state.refresh(repoPath));
+      await act(tester, () => state.selectFile(repoPath, 'draft.umsg'));
+
+      await tester.tap(find.text('File'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(TextField),
+        '%unimsg 0\ndemo { added { what "new" } }\n',
+      );
+      await act(tester, () async {});
+      await tester.tap(find.text('Document'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('added'), findsOneWidget);
+      expect(find.text('presentation'), findsNothing);
+
+      state.discardDraft(repoPath, 'draft.umsg');
+    });
+
+    testWidgets('an ordinary file is offered no document view', (tester) async {
+      final state = await pumpExplorer(tester);
+      await act(tester, () => state.selectFile(repoPath, 'lib/main.dart'));
+      expect(find.text('Document'), findsNothing);
+      expect(find.byType(UnimsgDocumentView), findsNothing);
     });
   });
 

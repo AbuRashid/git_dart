@@ -378,6 +378,7 @@ final class _Lexer {
 final class _Parser {
   final List<_Token> tokens;
   int index = 0;
+  int depth = 0;
   _Parser(this.tokens);
 
   UnimsgDocument document() {
@@ -440,7 +441,24 @@ final class _Parser {
     return annotations.isEmpty ? value : UAnnotated(annotations, value);
   }
 
+  /// The same cap the decoder uses, for the same reason: parsing recurses, and
+  /// a document of five thousand open brackets is four bytes a level. Without
+  /// this the stack decides where the limit is, and it reports by dying rather
+  /// than by returning an error with a position on it.
   UValue _value() {
+    if (depth >= maxDepth) {
+      final t = _peek;
+      throw UnimsgException('nesting deeper than $maxDepth', t.line, t.column);
+    }
+    depth++;
+    try {
+      return _valueInner();
+    } finally {
+      depth--;
+    }
+  }
+
+  UValue _valueInner() {
     final token = _next;
     switch (token.type) {
       case _TokenType.leftBrace:
@@ -605,11 +623,13 @@ int? _timestampPrefix(String source) {
 }
 
 bool _validNumber(String text) {
+  // The `f` marker attaches to any mantissa and does not require a decimal
+  // point: `0f` and `2f` are floats exactly as `2.5f` is. This used to carry a
+  // further clause requiring a '.' or an exponent before accepting the marker,
+  // which refused `2f` while accepting `6e23f` — the same absence of a point,
+  // let through because the exponent made it look decimal.
   final core = text.endsWith('f') ? text.substring(0, text.length - 1) : text;
-  return RegExp(r'^-?\d+(\.\d+)?([eE][+-]?\d+)?$').hasMatch(core) &&
-      (core.contains('.') ||
-          core.contains(RegExp('[eE]')) ||
-          !text.endsWith('f'));
+  return RegExp(r'^-?\d+(\.\d+)?([eE][+-]?\d+)?$').hasMatch(core);
 }
 
 UValue _numberValue(String text) {

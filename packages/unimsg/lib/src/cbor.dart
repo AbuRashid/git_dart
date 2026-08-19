@@ -10,6 +10,9 @@ const int _timestampTag = 70106;
 final BigInt _maxUint64 = (BigInt.one << 64) - BigInt.one;
 
 Uint8List encode(UValue value) {
+  if (valueDepth(value) > maxDepth) {
+    throw UnimsgException('value nested deeper than $maxDepth', 1, 1);
+  }
   final output = <int>[];
   _Encoder(output).value(value);
   return Uint8List.fromList(output);
@@ -223,12 +226,36 @@ final class _Encoder {
   }
 }
 
+/// Caps nesting for the decoder and the text parser alike. It is a
+/// stack-safety measure, not a conformance limit: profiles/v0 declares
+/// `limits.max-depth 500`, which a profile check enforces separately and which
+/// is deliberately the smaller of the two. A document between the two numbers
+/// is well-formed and profile-violating, which is the distinction the two
+/// limits exist to keep apart.
+const int maxDepth = 1024;
+
 final class _Decoder {
   final Uint8List bytes;
   int offset = 0;
+  int depth = 0;
   _Decoder(this.bytes);
 
+  /// Counted for every value, not only containers, because tags nest too.
+  /// Without this a few thousand open brackets exhaust the stack, and a stack
+  /// overflow is not an error an implementation can report.
   UValue value() {
+    if (depth >= maxDepth) {
+      throw UnimsgException.binary('nesting deeper than $maxDepth', offset);
+    }
+    depth++;
+    try {
+      return _valueInner();
+    } finally {
+      depth--;
+    }
+  }
+
+  UValue _valueInner() {
     final start = offset;
     final initial = _byte();
     final major = initial >> 5;

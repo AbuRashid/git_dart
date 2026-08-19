@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:syntax_dart/syntax_dart.dart';
+import 'package:unimsg_view/unimsg_view.dart';
 
 import '../generated/tokens.dart';
 import '../models.dart';
@@ -1597,10 +1598,23 @@ class _FileDetail extends StatefulWidget {
   State<_FileDetail> createState() => _FileDetailState();
 }
 
+/// The ways one file can be shown.
+enum _FileView { document, file, diff }
+
 class _FileDetailState extends State<_FileDetail> {
   /// A changed file opens on the file, not on its diff: the file is the thing
-  /// that can be acted on (`editing.a-changed-file-opens-on-the-file`).
-  bool _showDiff = false;
+  /// that can be acted on (`editing.a-changed-file-opens-on-the-file`). A
+  /// document opens on the document, for the reason given in
+  /// `presentation.a-document-opens-as-a-document`.
+  _FileView _view = _FileView.file;
+
+  /// Which file the choice above was made for, so that opening another one
+  /// starts from its own default rather than from the last file's.
+  String? _viewFor;
+
+  /// The open file read as a document, and the text it was read from.
+  DocumentSource? _reading;
+  String? _readFrom;
 
   final _editor = HighlightingEditingController();
   final _editorFocus = FocusNode();
@@ -1634,6 +1648,25 @@ class _FileDetailState extends State<_FileDetail> {
     );
   }
 
+  /// Whether this file is one this application can read as a document.
+  ///
+  /// The name, not the contents: a file that will not parse is still a `.umsg`
+  /// file, and telling its author that it has stopped being one because they
+  /// are half-way through typing a brace would be unhelpful and untrue.
+  bool get _isDocument => widget.path.toLowerCase().endsWith('.umsg');
+
+  /// Reads the open file as a document, once per change to its text.
+  void _syncDocument(String? source) {
+    if (source == null) {
+      _reading = null;
+      _readFrom = null;
+      return;
+    }
+    if (_readFrom == source) return;
+    _readFrom = source;
+    _reading = DocumentSource.read(source);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1647,6 +1680,32 @@ class _FileDetailState extends State<_FileDetail> {
         revision.kind.editable && content != null && content.isEditable;
 
     if (editable) _syncEditor(content);
+
+    // The draft rather than the saved text, so the page shows what the editor
+    // holds. Someone who edits, switches to the document and finds their last
+    // paragraph missing has been shown a different file than the one they are
+    // working on.
+    final source =
+        state.draftFor(widget.repositoryPath, widget.path) ?? content?.text;
+    if (_isDocument) _syncDocument(source);
+
+    final key = '${widget.repositoryPath} ${widget.path}';
+    if (content != null && _viewFor != key) {
+      _viewFor = key;
+      _view = _isDocument && (_reading?.isDocument ?? false)
+          ? _FileView.document
+          : _FileView.file;
+    }
+
+    final views = [
+      if (_isDocument) _FileView.document,
+      _FileView.file,
+      if (diff != null) _FileView.diff,
+    ];
+    // A diff of something being edited compares the wrong pair, so it is
+    // withheld rather than shown wrong — the rule this pane already followed.
+    final showing =
+        _view == _FileView.diff && dirty ? _FileView.file : _view;
 
     return Column(
       children: [
@@ -1672,23 +1731,37 @@ class _FileDetailState extends State<_FileDetail> {
               ),
               const SizedBox(width: 8),
             ],
-            if (diff != null)
-              SegmentedButton<bool>(
-                segments: const [
-                  ButtonSegment(value: false, label: Text('File')),
-                  ButtonSegment(value: true, label: Text('Diff')),
+            if (views.length > 1)
+              SegmentedButton<_FileView>(
+                segments: [
+                  for (final view in views)
+                    ButtonSegment(
+                      value: view,
+                      label: Text(switch (view) {
+                        _FileView.document => 'Document',
+                        _FileView.file => 'File',
+                        _FileView.diff => 'Diff',
+                      }),
+                    ),
                 ],
-                selected: {_showDiff},
+                selected: {showing},
                 showSelectedIcon: false,
                 onSelectionChanged: (selection) =>
-                    setState(() => _showDiff = selection.first),
+                    setState(() => _view = selection.first),
               ),
             const SizedBox(width: 8),
           ],
         ),
         if (content == null)
           const Expanded(child: Center(child: CircularProgressIndicator()))
-        else if (diff != null && _showDiff && !dirty)
+        else if (showing == _FileView.document)
+          Expanded(
+            child: _DocumentPane(
+              reading: _reading,
+              title: widget.path.split('/').last,
+            ),
+          )
+        else if (showing == _FileView.diff && diff != null)
           Expanded(child: _DiffView(diff: diff))
         else if (editable)
           Expanded(
@@ -1770,6 +1843,69 @@ class _Editor extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// A `.umsg` file, as the document it is
+/// (`presentation.a-document-opens-as-a-document`).
+class _DocumentPane extends StatelessWidget {
+  final DocumentSource? reading;
+  final String title;
+
+  const _DocumentPane({required this.reading, required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final document = reading?.document;
+
+    if (document == null) {
+      // Being unreadable is an ordinary state for a file someone is typing
+      // into, not a failure. It says where, because that is the one thing the
+      // author needs in order to fix it, and it does not offer to hide the
+      // problem by showing a stale page.
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.report_gmailerrorred_outlined,
+                size: 36,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Not a document yet',
+                style: theme.textTheme.titleSmall,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                reading?.says ?? 'nothing to read',
+                textAlign: TextAlign.center,
+                style: monospaceStyle(context)
+                    .copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'The File view shows it as it stands.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return UnimsgDocumentView(
+      document: document,
+      title: title,
+      palette: documentPalette(context),
+      // The preamble is the one part of the file the tree does not carry.
+      source: reading?.text,
     );
   }
 }

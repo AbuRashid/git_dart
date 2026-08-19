@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:syntax_dart/syntax_dart.dart';
+import 'package:unimsg_view/unimsg_view.dart';
 
 import '../models.dart';
 import '../theme.dart';
@@ -181,3 +182,18 @@ class HighlightingEditingController extends TextEditingController {
     return TextSpan(style: style, children: children);
   }
 }
+
+/// The document view's colours, taken from the source view's
+/// (`presentation.syntax-colour`).
+///
+/// The same file can be open as source or as a page, and a symbol should not
+/// change colour between the two. A reader who has learned that purple means
+/// an atom has learned it once.
+UnimsgPalette documentPalette(BuildContext context) => UnimsgPalette(
+      name: syntaxColor(TokenKind.name, context)!,
+      atom: syntaxColor(TokenKind.keyword, context)!,
+      meta: syntaxColor(TokenKind.meta, context)!,
+      text: syntaxColor(TokenKind.string, context)!,
+      number: syntaxColor(TokenKind.number, context)!,
+      quiet: Theme.of(context).colorScheme.onSurfaceVariant,
+    );

@@ -15,6 +15,7 @@ void main() {
     'BOM, nesting, comments, and trailing bytes stay strict': _boundaryStrictness,
     'tables are exact sugar': _tables,
     'binary decoding produces a document': _binaryText,
+    'a table never emits a cell that swallows the next': _tableIdentifierCells,
     'prescribed errors carry positions': _errors,
     'Unicode marks and byte literals parse': _unicodeAndBytes,
   };
@@ -212,4 +213,30 @@ bool _equal(List<int> a, List<int> b) {
     if (a[i] != b[i]) return false;
   }
   return true;
+}
+
+// A cell rendering as `@name` annotates the cell after it, so the emitted
+// table read back one cell short and the formatter's own output would not
+// parse. Only the last column is safe.
+//
+// Restored here after a sync found it missing: this case was dropped when the
+// implementation was vendored, and it guards a defect that shipped in five
+// independent implementations at once.
+void _tableIdentifierCells() {
+  const hazard =
+      'x [ { id @a1, name "alpha widget" }, { id @a2, name "beta widget" },'
+      ' { id @a3, name "gamma widget" } ]';
+  final formatted = formatDocument(parse(hazard));
+  _expect(!formatted.contains('|'),
+      'identifier in a non-final column rendered as a table:\n$formatted');
+  _expectBytes(encode(parse(formatted).value), encode(parse(hazard).value));
+
+  // Safe in the last column, where the newline ends the value.
+  const safe =
+      'x [ { name "alpha widget", tag @a1 }, { name "beta widget", tag @a2 },'
+      ' { name "gamma widget", tag @a3 } ]';
+  final table = formatDocument(parse(safe));
+  _expect(table.contains('|'),
+      'identifier in the final column should still tabulate:\n$table');
+  _expectBytes(encode(parse(table).value), encode(parse(safe).value));
 }

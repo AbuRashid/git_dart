@@ -3,6 +3,9 @@ part of '../unimsg.dart';
 const int _formatBudget = 56;
 
 String formatDocument(UnimsgDocument document) {
+  if (valueDepth(document.value) > maxDepth) {
+    throw UnimsgException('value nested deeper than $maxDepth', 1, 1);
+  }
   final output = StringBuffer();
   final header = document.header;
   if (header != null) {
@@ -19,7 +22,12 @@ String formatDocument(UnimsgDocument document) {
   return result.endsWith('\n') ? result : '$result\n';
 }
 
-String formatValue(UValue value) => _renderAt(value, 0);
+String formatValue(UValue value) {
+  if (valueDepth(value) > maxDepth) {
+    throw UnimsgException('value nested deeper than $maxDepth', 1, 1);
+  }
+  return _renderAt(value, 0);
+}
 
 String _renderAt(UValue value, int indent) {
   final single = _inline(value);
@@ -89,9 +97,16 @@ String? _renderTable(List<UValue> values, int indent) {
   for (final map in maps) {
     if (map.length != keys.length) return null;
     final row = <String>[];
-    for (final key in keys) {
+    for (var i = 0; i < keys.length; i++) {
+      final key = keys[i];
       final matches = map.where((entry) => entry.key == key).toList();
       if (matches.length != 1 || matches.single.comments.isNotEmpty)
+        return null;
+      // A cell ending in an identifier annotates the cell after it, so the
+      // row would read back one cell short and the table would not parse as
+      // the value it was written from. Safe only in the last column, where
+      // the newline ends the value.
+      if (i + 1 != keys.length && _endsInIdentifier(matches.single.value))
         return null;
       final cell = _inline(matches.single.value);
       if (cell == null) return null;
@@ -123,6 +138,20 @@ String? _renderTable(List<UValue> values, int indent) {
     '${' ' * indent}]',
   ].join('\n');
 }
+
+/// Whether a value renders with a trailing `@name`.
+///
+/// Table cells carry no separator, which works only while every cell is
+/// self-delimiting — `usd 129.99` consumes exactly one qualifier and one
+/// value. An identifier is the exception: `@name` before a value annotates it.
+/// Envelopes rendering as `prefix VALUE` inherit the hazard from what they
+/// wrap.
+bool _endsInIdentifier(UValue value) => switch (value) {
+      UIdentifier() => true,
+      UAnnotated(:final value) => _endsInIdentifier(value),
+      UExtension(:final value) => _endsInIdentifier(value),
+      _ => false,
+    };
 
 String? _inline(UValue value) {
   late String output;

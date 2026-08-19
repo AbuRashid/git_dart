@@ -129,6 +129,23 @@ spec @unimsg/v0 {
       ]
       note "A number immediately followed by word characters is a malformed
             number, not a number then a word: 12abc is an error."
+
+      the-marker-does-not-require-a-point "`f` marks the number binary rather
+            than exact. It attaches to ANY of the forms above and imposes no
+            shape on the mantissa: `0f`, `2f` and `-3f` are floats exactly as
+            `2.5f` is, and `6e23f` is one with no point in it at all.
+
+            Said outright because the table shows only `2.5f` and two
+            implementations read the single example as a requirement, refusing
+            `0f` while accepting `6e23f` — which is the same absence of a point
+            and was accepted because the exponent made it look decimal. A
+            corpus document writing `min [ 32.81f, -35.2f, 0f ]` is what
+            surfaced it.
+
+            Nothing canonical turns on this. Every formatter here renders float
+            zero as `0.0f`, so the two readings differ only over what an author
+            may WRITE, and the disagreement could not show up in a comparison of
+            bytes."
     }
 
     timestamps {
@@ -245,6 +262,57 @@ spec @unimsg/v0 {
          sets. Header cells name the fields; each row must supply exactly as
          many cells. Cells need no separator because an annotated value is
          self-delimiting."
+
+      column-order-is-authored-metadata "A table's columns are map keys, and map
+         keys sort canonically, so the order a table was written in is not
+         recoverable from the encoding. That is correct and must stay correct:
+         two documents that decode identically have to encode identically, or
+         an address means nothing.
+
+         But the order carries meaning to a reader — an identifier, then what
+         was given, then what is expected — and losing it makes a vector table
+         materially harder to use. So the authored order is kept OUT of the
+         value, alongside the comments, which solve the same problem the same
+         way: a decoder produces the map, and the document separately records
+         which order its columns were written in, keyed by path.
+
+         What follows from that, and is the honest cost: the order survives a
+         text round trip and does not survive an encode and decode. A document
+         read from CBOR has its columns in canonical order and no way to know
+         what the author intended, exactly as it has no comments. Anything that
+         needs the authored order must read the text."
+
+      whether-a-final-row-needs-a-separator "UNRESOLVED, and recorded here
+         rather than settled, because the implementations are split and the
+         split is close.
+
+         The grammar above says a row is `'|' , { cell } , separator`, which
+         requires a separator on EVERY row including the last — so
+         `x [ | a b, | 1 2 ]`, with the closing bracket directly after the final
+         cell, is malformed. Two implementations read it that way and refuse it.
+         Three accept it.
+
+           refuse: rust, dart
+           accept: go, js, the reference
+
+         Neither reading is obviously wrong, which is why this is a note and not
+         a ruling. For the strict reading: the EBNF says what it says, and the
+         precedent of `a-separator-between-items-is-required` was decided in
+         favour of the written grammar. For the lenient reading: a map's final
+         pair needs no trailing separator and neither does a sequence's final
+         element, so requiring one here makes the table the single place in the
+         format where a closing bracket cannot follow the last item — and that
+         reads like an oversight in the production rather than a decision, since
+         the table rule was written without the `{ separator }` tail that map
+         and seq both carry.
+
+         What is NOT at stake: any canonical document. The formatter always ends
+         a block table's final row with a newline, so every document this
+         project has ever emitted satisfies both readings. The disagreement is
+         reachable only by hand-written single-line tables.
+
+         Found by writing a table into a conformance vector and discovering that
+         the vector itself had never been executed."
 
       header-cells-are-keys "A header cell names a map key, so it may be
          written the way a key is written anywhere else: a bare word, or a
@@ -484,12 +552,13 @@ spec @unimsg/v0 {
     vectors [
       | source                                      canonical-hex
       | "a 1"                                       "a1616101"
-      | "x [ | a b || 1 2 ]"                        "a1617881a2616101616202"
-      | "x [ | \"a\" \"b\" || 1 2 ]"                  "a1617881a2616101616202"
+      | "x [ | a b, | 1 2, ]"                       "a1617881a2616101616202"
+      | "x [ | \"a\" \"b\", | 1 2, ]"                 "a1617881a2616101616202"
       | "a -1"                                      "a1616120"
       | "a 1.0"                                     "a16161c482200a"
       | "a 1.00"                                    "a16161c482211864"
       | "a 1.0f"                                    "a16161f93c00"
+      | "a 0f"                                       "a16161f90000"
       | "a \"x\""                                   "a161616178"
       | "a :x"                                      "a16161da000111d46178"
       | "a true"                                    "a16161f5"

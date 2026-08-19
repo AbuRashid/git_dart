@@ -1,0 +1,22 @@
+name: unimsg_view
+description: >-
+  Renders a unimsg document as a Material page. Nothing here knows what any
+  document means; every treatment is chosen from structure alone.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  unimsg:
+    path: ../unimsg
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:

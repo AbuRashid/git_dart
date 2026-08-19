@@ -514,6 +514,13 @@ packages:
       relative: true
     source: path
     version: "0.1.0"
+  unimsg_view:
+    dependency: "direct main"
+    description:
+      path: "../../packages/unimsg_view"
+      relative: true
+    source: path
+    version: "0.1.0"
   vector_math:
     dependency: transitive
     description:

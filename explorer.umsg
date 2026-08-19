@@ -445,6 +445,66 @@ gitexplorer @apps/gitexplorer/v0 {
          spelled is not something a file explorer should contain, and a
          highlighter that cannot be used by anything but this window is a
          highlighter nobody will fix."
+
+    a-document-opens-as-a-document "A `.umsg` file is shown as the document it
+         is, with the source one click away. These files are written to be
+         read, and a specification nobody can skim is a specification nobody
+         reads. The editor is still there; it is one segment across.
+
+         The page is drawn from structure alone. A map whose values are all
+         maps is a keyed collection whatever it holds; a sequence of maps with
+         the same keys is a table whether it was written as rows or longhand;
+         a map of non-negative numbers is a set of magnitudes. Nothing reads a
+         key for its meaning. A treatment chosen from what a key is called
+         works on the document in front of the author and fails silently on
+         the next one.
+
+         Two treatments were designed and then dropped, because the corpus was
+         asked and said no. Linking every backticked name to whatever it might
+         denote resolved fifteen times in eighty-one — the rest are `main` and
+         `author` and `user.email`, which are code and not cross-references,
+         and a link that is wrong four times in five teaches a reader to stop
+         trying. Reading a parenthesised dotted name as a reference fired
+         nowhere at all: that is a convention of this repository's Dart
+         comments and not of its documents."
+
+    a-file-that-does-not-parse-says-where "Being unreadable is an ordinary
+         state for a file somebody is typing into, not a failure. The document
+         view names the line and column and stops, rather than showing the
+         last version that parsed — a page that silently lags the file it
+         claims to be is worse than no page, because nothing about it says so."
+
+    a-document-shows-its-contents "A document of two dozen sections is a
+         scroll unless it says what is in it. The contents sits beside the
+         page where there is room for a column, and folds into something to
+         open where there is not; below that width the choice is between a
+         column of contents and a column of document, and the document wins.
+
+         It names the section keys and not the banners an author drew over
+         them. A banner is more human, and it is also a second set of names: a
+         contents whose entries do not match the headings they lead to leaves
+         a reader holding two vocabularies for one document.
+
+         It follows the reader down the page, marking the section they are
+         in. That is measured from where the headings are rather than from a
+         table of offsets taken once, because opening a note moves everything
+         below it, and a contents that lags the page is worse than a still
+         one — it is confidently wrong rather than merely quiet."
+
+    the-top-of-a-file-is-part-of-the-document "The comment block above the
+         first pair is the document's own statement of what it is, and in
+         every document here it is the paragraph most worth reading first. It
+         is shown open, under the title, where a section's note is shown
+         closed: there is one of these and there are dozens of those, so
+         collapsing the many keeps the page skimmable and collapsing the one
+         would hide the sentence that says what the reader is looking at.
+
+         The Dart parser drops it — a comment counts as a separator there, so
+         the skip past the header eats the block before the pair loop can
+         collect it, while the JavaScript implementation keeps it on the first
+         pair. Until that is settled the block is read from the file's text.
+         The tree is asked first, so the day the parser keeps it the text is
+         no longer consulted rather than the two doubling up."
   }
   -- ===================================================================
   -- CONCURRENCY

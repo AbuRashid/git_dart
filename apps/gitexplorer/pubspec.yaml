@@ -16,6 +16,8 @@ dependencies:
   path_provider: ^2.1.4
   syntax_dart:
     path: ../../packages/syntax_dart
+  unimsg_view:
+    path: ../../packages/unimsg_view
 dev_dependencies:
   flutter_launcher_icons: ^0.14.4
   flutter_lints: ^4.0.0

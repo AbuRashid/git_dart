@@ -142,3 +142,43 @@ final class UTagged extends UValue {
   UTagged(Object tag, this.value)
       : tag = tag is BigInt ? tag : BigInt.from(tag as int);
 }
+
+/// The nesting depth of a value.
+///
+/// Walked with an explicit stack rather than by recursion, because a function
+/// whose job is to detect unbounded nesting must not itself be defeated by it.
+///
+/// Used by [encode] and by the formatters, which are reached with an over-deep
+/// value only when one was built in memory: both readers cap nesting, so nothing
+/// that was read can exceed it. Guarded anyway, because otherwise those are the
+/// entry points that are not total in an implementation whose decoder is
+/// careful to be. Measured once at the entry, not per level: the renderers call
+/// each other freely and re-walking at every level would make formatting
+/// quadratic on exactly the input this guards against.
+int valueDepth(UValue value) {
+  final stack = <(UValue, int)>[(value, 1)];
+  var max = 0;
+  while (stack.isNotEmpty) {
+    final (v, d) = stack.removeLast();
+    if (d > max) max = d;
+    // Nothing below changes the verdict once the cap is passed.
+    if (max > maxDepth) return max;
+    switch (v) {
+      case USeq(:final values):
+        for (final item in values) {
+          stack.add((item, d + 1));
+        }
+      case UMap(:final entries):
+        for (final e in entries) {
+          stack.add((e.value, d + 1));
+        }
+      case UAnnotated(:final value):
+        stack.add((value, d + 1));
+      case UExtension(:final value):
+        stack.add((value, d + 1));
+      default:
+        break;
+    }
+  }
+  return max;
+}
