@@ -5,6 +5,7 @@
 /// agreement with git, not with this library's own idea of a clone.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -28,6 +29,99 @@ String git(List<String> arguments, {String? cwd}) {
   }
   return result.stdout as String;
 }
+
+Future<HttpServer> serve(
+  String repositoryPath, {
+  bool allowVersion2 = true,
+}) async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+
+  Map<String, String> environmentFor(HttpRequest request) {
+    final asked = request.headers.value('Git-Protocol');
+    if (!allowVersion2 || asked == null) return const {};
+    return {'GIT_PROTOCOL': asked};
+  }
+
+  server.listen((request) async {
+    try {
+      if (request.method == 'GET' &&
+          request.uri.path.endsWith('/info/refs')) {
+        final process = await Process.start(
+          'git',
+          [
+            'upload-pack',
+            '--stateless-rpc',
+            '--advertise-refs',
+            repositoryPath,
+          ],
+          environment: environmentFor(request),
+        );
+        // Drained, or a full stderr pipe blocks upload-pack for ever.
+        unawaited(process.stderr.drain<void>());
+        final body = await process.stdout.fold<List<int>>(
+          <int>[],
+          (all, chunk) => all..addAll(chunk),
+        );
+
+        // The service banner and a flush come before what upload-pack wrote.
+        final prelude = <int>[
+          ...PktLine.text('# service=git-upload-pack\n').encode(),
+          ...PktLine.flush.encode(),
+        ];
+
+        request.response
+          ..statusCode = 200
+          ..headers.set(
+            'Content-Type',
+            'application/x-git-upload-pack-advertisement',
+          )
+          ..add(prelude)
+          ..add(body);
+        await request.response.close();
+        return;
+      }
+
+      if (request.method == 'POST' &&
+          request.uri.path.endsWith('/git-upload-pack')) {
+        final input = await request.fold<List<int>>(
+          <int>[],
+          (all, chunk) => all..addAll(chunk),
+        );
+
+        final process = await Process.start(
+          'git',
+          ['upload-pack', '--stateless-rpc', repositoryPath],
+          environment: environmentFor(request),
+        );
+        unawaited(process.stderr.drain<void>());
+        process.stdin.add(input);
+        await process.stdin.close();
+
+        final body = await process.stdout.fold<List<int>>(
+          <int>[],
+          (all, chunk) => all..addAll(chunk),
+        );
+
+        request.response
+          ..statusCode = 200
+          ..headers
+              .set('Content-Type', 'application/x-git-upload-pack-result')
+          ..add(body);
+        await request.response.close();
+        return;
+      }
+
+      request.response.statusCode = 404;
+      await request.response.close();
+    } catch (error) {
+      request.response.statusCode = 500;
+      await request.response.close();
+    }
+  });
+
+  return server;
+}
+
 
 void main() {
   setUp(() {
@@ -163,5 +257,57 @@ void main() {
     );
     expect(Directory(into('copy')).existsSync(), isTrue);
     expect(Directory(into('copy')).listSync(), isEmpty);
+  });
+
+  group('over HTTP', () {
+    late HttpServer server;
+    late String url;
+
+    setUp(() async {
+      server = await serve(originPath);
+      url = 'http://127.0.0.1:${server.port}/repo.git';
+    });
+
+    tearDown(() => server.close(force: true));
+
+    test('clones from a smart-HTTP host', () async {
+      final result = await clone(url, into('http-copy'));
+
+      expect(result.branchName, 'main');
+      expect(result.objectsReceived, greaterThan(0));
+      expect(
+        File(p.join(into('http-copy'), 'a.txt')).readAsStringSync(),
+        'one\n',
+      );
+
+      final repo = Repository.open(into('http-copy'));
+      addTearDown(repo.close);
+      expect(repo.headId!.hex, git(['rev-parse', 'HEAD']).trim());
+      // The remote is recorded as the URL it came from, so a later fetch has
+      // somewhere to go.
+      expect(
+        git(['config', 'remote.origin.url'], cwd: into('http-copy')).trim(),
+        url,
+      );
+    });
+
+    test('a host that refuses is an error, and leaves nothing behind',
+        () async {
+      // The fixture above answers for any path, so a wrong path there proves
+      // nothing. This is a host that says no to everything, which is what an
+      // absent repository looks like from the client's side.
+      final refuses = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => refuses.close(force: true));
+      refuses.listen((request) async {
+        request.response.statusCode = 404;
+        await request.response.close();
+      });
+
+      await expectLater(
+        clone('http://127.0.0.1:${refuses.port}/nope.git', into('bad')),
+        throwsA(anything),
+      );
+      expect(Directory(into('bad')).existsSync(), isFalse);
+    });
   });
 }
