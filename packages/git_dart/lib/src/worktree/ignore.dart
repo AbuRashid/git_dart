@@ -8,7 +8,18 @@ import '../platform/host.dart';
 
 /// One line of a `.gitignore`.
 class IgnorePattern {
+  /// Matches the path or anything below it, which is `.gitignore`'s rule: an
+  /// ignored directory takes its contents with it.
   final RegExp matcher;
+
+  /// Matches the path and nothing under it.
+  ///
+  /// Needed by a caller that walks a path one component at a time and wants
+  /// each level answered on its own. Under [matcher] a root pattern like `/*`
+  /// also claims `keep/k.txt`, which would let it overrule a decision made
+  /// about `keep` — right for "is this ignored", wrong for a walk that has
+  /// already asked about the directory.
+  final RegExp exactMatcher;
 
   /// A `!` pattern un-ignores what an earlier pattern ignored.
   final bool negated;
@@ -24,6 +35,7 @@ class IgnorePattern {
 
   const IgnorePattern({
     required this.matcher,
+    required this.exactMatcher,
     required this.negated,
     required this.directoryOnly,
     required this.base,
@@ -59,8 +71,26 @@ class IgnoreRules {
 
   /// True when [path] — relative to the working tree root, forward slashes —
   /// is ignored.
-  bool isIgnored(String path, {bool isDirectory = false}) {
-    var ignored = false;
+  bool isIgnored(String path, {bool isDirectory = false}) =>
+      decide(path, isDirectory: isDirectory) ?? false;
+
+  /// What the rules say about [path], or null when none of them mention it.
+  ///
+  /// The distinction matters to anything that carries a decision from one path
+  /// component to the next: "no rule matched" has to leave an inherited answer
+  /// alone, where "a rule matched and it was negated" has to overturn it.
+  /// [isIgnored] can collapse the two because an unmentioned path is not
+  /// ignored; sparse checkout cannot, because an unmentioned path inherits
+  /// whatever its directory was told.
+  /// [exact] answers about this path alone, ignoring the rule that a matched
+  /// directory carries its contents. A caller walking a path component by
+  /// component has already accounted for the directories itself.
+  bool? decide(
+    String path, {
+    bool isDirectory = false,
+    bool exact = false,
+  }) {
+    bool? decision;
     for (final pattern in patterns) {
       if (pattern.base.isNotEmpty && !path.startsWith('${pattern.base}/')) {
         continue;
@@ -69,9 +99,10 @@ class IgnoreRules {
           ? path
           : path.substring(pattern.base.length + 1);
       if (pattern.directoryOnly && !isDirectory) continue;
-      if (pattern.matcher.hasMatch(relative)) ignored = !pattern.negated;
+      final matcher = exact ? pattern.exactMatcher : pattern.matcher;
+      if (matcher.hasMatch(relative)) decision = !pattern.negated;
     }
-    return ignored;
+    return decision;
   }
 
   /// True when [path] or any directory above it is ignored. A file inside an
@@ -112,12 +143,11 @@ class IgnoreRules {
     final anchored = text.contains('/');
     if (text.startsWith('/')) text = text.substring(1);
 
-    final expression = StringBuffer(anchored ? '^' : r'^(.*/)?');
-    expression.write(_translate(text));
-    expression.write(r'(/.*)?$');
+    final body = (anchored ? '^' : r'^(.*/)?') + _translate(text);
 
     return IgnorePattern(
-      matcher: RegExp(expression.toString()),
+      matcher: RegExp('$body(/.*)?\$'),
+      exactMatcher: RegExp('$body\$'),
       negated: negated,
       directoryOnly: directoryOnly,
       base: base,

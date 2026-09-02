@@ -9,6 +9,7 @@ import '../objects/git_object.dart';
 import '../objects/tree.dart';
 import '../repository.dart';
 import 'attributes.dart';
+import 'sparse_checkout.dart';
 import 'status.dart';
 import '../platform/host.dart';
 
@@ -62,6 +63,12 @@ CheckoutResult checkoutTree(
     throw StateError('a bare repository has no working tree to check out');
   }
 
+  // Which paths belong on disk at all. A narrowed checkout must not write the
+  // files it was told to leave out, and must not report them missing either -
+  // so the same answer decides what is written here and what carries the
+  // skip-worktree bit into the new index.
+  final sparse = SparseCheckout.forRepository(repo);
+
   // The index, not HEAD, is what the working tree currently reflects: a file
   // staged but not committed is present, and a checkout has to account for it.
   final index = repo.index ?? GitIndex.empty();
@@ -88,9 +95,10 @@ CheckoutResult checkoutTree(
 
   final toWrite = [
     for (final entry in wanted.entries)
-      if (current[entry.key]?.id != entry.value.id ||
-          current[entry.key]?.mode != entry.value.mode.numeric ||
-          (force && dirty.contains(entry.key)))
+      if (sparse.includes(entry.key) &&
+          (current[entry.key]?.id != entry.value.id ||
+              current[entry.key]?.mode != entry.value.mode.numeric ||
+              (force && dirty.contains(entry.key))))
         entry.key,
   ];
 
@@ -132,7 +140,7 @@ CheckoutResult checkoutTree(
   }
 
   _removeEmptyDirectories(workTree, removedPaths);
-  _writeIndexFor(repo, workTree, target);
+  _writeIndexFor(repo, workTree, target, sparse);
 
   return CheckoutResult(
     written: written,
@@ -229,9 +237,14 @@ void _removeEmptyDirectories(String workTree, List<String> removedPaths) {
 /// The stat fields are filled in because they are a cache and an empty cache
 /// makes every later status re-read every file — correct, and slow
 /// (`index.the-stat-fields-are-a-cache`).
-void _writeIndexFor(Repository repo, String workTree, Tree tree) {
+void _writeIndexFor(
+  Repository repo,
+  String workTree,
+  Tree tree,
+  SparseCheckout sparse,
+) {
   final entries = <IndexEntry>[];
-  _collect(repo, tree, '', workTree, entries);
+  _collect(repo, tree, '', workTree, sparse, entries);
   GitIndex(entries: entries).writeTo(p.join(repo.gitDirectory, 'index'));
 }
 
@@ -240,6 +253,7 @@ void _collect(
   Tree tree,
   String prefix,
   String workTree,
+  SparseCheckout sparse,
   List<IndexEntry> out,
 ) {
   for (final entry in tree.entries) {
@@ -250,14 +264,20 @@ void _collect(
         repo.objects.readTyped<Tree>(entry.id),
         '$path/',
         workTree,
+        sparse,
         out,
       );
       continue;
     }
     if (entry.mode.isSubmodule) continue;
 
+    // A path outside the sparse set has no file on disk and must not look as
+    // though it should have one: the bit is what says so, and its stat data is
+    // zeroed so nothing can mistake it for matching something.
+    final skipped = !sparse.includes(path);
+
     final file = fs.file(_absolute(workTree, path));
-    final stat = file.existsSync() ? file.statSync() : null;
+    final stat = skipped || !file.existsSync() ? null : file.statSync();
     final seconds = stat == null
         ? 0
         : stat.modified.millisecondsSinceEpoch ~/ 1000;
@@ -269,6 +289,7 @@ void _collect(
       ctimeSeconds: seconds,
       mtimeSeconds: seconds,
       size: stat?.size ?? 0,
+      skipWorktree: skipped,
     ));
   }
 }

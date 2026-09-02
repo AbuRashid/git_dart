@@ -81,20 +81,45 @@ class GitConfig {
   /// created without reading it got a different branch name from the one the
   /// user's own git would have created. A config reader that answers
   /// differently from `git config` is not a config reader.
-  factory GitConfig.forRepository(String gitDirectory) {
+  /// The config in force, machine then user then repository, last winning.
+  ///
+  /// [worktreeDirectory] is where this particular working tree's own config
+  /// lives, which is the same place except in a linked worktree. It is read
+  /// only when `extensions.worktreeConfig` says to, and it is what carries
+  /// settings that are true of one checkout rather than of the repository —
+  /// sparse checkout above all, since two worktrees of one repository are
+  /// entitled to hold different parts of the tree. Missed at first, and the
+  /// symptom was a sparse repository reading as though sparse checkout had
+  /// never been turned on.
+  factory GitConfig.forRepository(
+    String gitDirectory, {
+    String? worktreeDirectory,
+  }) {
     final merged = <String, List<String>>{};
-    for (final path in [
-      ...systemConfigPaths,
-      ...globalConfigPaths,
-      p.join(gitDirectory, 'config'),
-    ]) {
+
+    void mergeIn(String path) {
       final file = fs.file(path);
-      if (!file.existsSync()) continue;
+      if (!file.existsSync()) return;
       final parsed = GitConfig.parse(file.readAsStringSync());
       parsed._values.forEach((key, values) {
         merged.putIfAbsent(key, () => []).addAll(values);
       });
     }
+
+    for (final path in [
+      ...systemConfigPaths,
+      ...globalConfigPaths,
+      p.join(gitDirectory, 'config'),
+    ]) {
+      mergeIn(path);
+    }
+
+    // Read last, so a worktree's own answer beats the repository's.
+    final soFar = GitConfig(merged);
+    if (soFar.boolean('extensions.worktreeConfig') ?? false) {
+      mergeIn(p.join(worktreeDirectory ?? gitDirectory, 'config.worktree'));
+    }
+
     return GitConfig(merged);
   }
 

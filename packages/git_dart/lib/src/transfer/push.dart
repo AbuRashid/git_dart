@@ -57,18 +57,55 @@ class PushResult {
   bool get isEmpty => statuses.isEmpty;
 }
 
+/// What a caller believes the remote currently holds.
+///
+/// The lease is what makes a rewind safe to take. `force` says "overwrite
+/// whatever is there", which throws away work if somebody pushed in the
+/// meantime and nobody finds out until they look. A lease says "overwrite it
+/// only if it is still what I last saw" — so a rewind that was safe when it
+/// was decided on is still safe when it lands, and one that is not is refused
+/// instead of quietly taken.
+class PushLease {
+  /// What the remote is expected to hold, by ref path. A ref named here with
+  /// a null value is expected not to exist at all.
+  final Map<String, ObjectId?> expected;
+
+  /// Where an unnamed ref's expectation comes from when [expected] is silent:
+  /// the remote-tracking ref, which records what was there at the last fetch.
+  final bool useTrackingRefs;
+
+  const PushLease({
+    this.expected = const {},
+    this.useTrackingRefs = true,
+  });
+
+  /// The ordinary lease: every ref held against its tracking ref.
+  static const PushLease fromTracking = PushLease();
+
+  /// A lease naming the values outright, for a caller that knows what it saw
+  /// and would rather not depend on when it last fetched.
+  factory PushLease.of(Map<String, ObjectId?> expected) =>
+      PushLease(expected: expected, useTrackingRefs: false);
+}
+
 /// Sends [branches] to [remote]. Defaults to the current branch.
 ///
 /// A push is refused when it would not be a fast-forward — the remote holds
-/// commits the new tip does not contain — unless [force]. That check is the
-/// whole of what stands between pushing and losing someone else's work, so it
-/// happens here as well as on the server, which may not be configured to make
-/// it.
+/// commits the new tip does not contain — unless [force] or [lease]. That
+/// check is the whole of what stands between pushing and losing someone
+/// else's work, so it happens here as well as on the server, which may not be
+/// configured to make it.
+///
+/// [lease] is the safe way to rewind: the push goes through only while the
+/// remote still holds what the caller last saw. [force] is the unsafe way, and
+/// wins over a lease when both are given — a caller that asked for both has
+/// asked for the stronger thing.
 Future<PushResult> push(
   Repository repository,
   Remote remote, {
   List<String>? branches,
   bool force = false,
+  PushLease? lease,
   Credentials? credentials,
   void Function(String message)? onProgress,
 }) async {
@@ -88,16 +125,72 @@ Future<PushResult> push(
     wanted['refs/heads/$name'] = id;
   }
 
+  final held = force
+      ? null
+      : _heldValues(repository, remote, wanted.keys, lease);
+
   if (remote.isLocal) {
-    return _pushLocal(repository, remote, wanted, force, onProgress);
+    return _pushLocal(repository, remote, wanted, force, held, onProgress);
   }
   if (remote.url.startsWith('http://') || remote.url.startsWith('https://')) {
-    return _pushHttp(repository, remote, wanted, force, credentials, onProgress);
+    return _pushHttp(
+        repository, remote, wanted, force, held, credentials, onProgress);
   }
   throw UnsupportedError(
     'this build can push to a local path or over http(s); '
     '${remote.url} is neither',
   );
+}
+
+/// What each ref is leased against, or null when there is no lease at all.
+///
+/// A ref the lease cannot speak for is left out rather than given some
+/// default: leasing against a value nobody recorded would let a rewind through
+/// on the strength of a guess, which is the one thing a lease exists to stop.
+Map<String, ObjectId?>? _heldValues(
+  Repository repository,
+  Remote remote,
+  Iterable<String> refs,
+  PushLease? lease,
+) {
+  if (lease == null) return null;
+
+  final held = <String, ObjectId?>{};
+  for (final ref in refs) {
+    if (lease.expected.containsKey(ref)) {
+      held[ref] = lease.expected[ref];
+      continue;
+    }
+    if (!lease.useTrackingRefs) continue;
+
+    final tracking = remote.trackingRefFor(ref);
+    if (tracking == null || tracking.isEmpty) continue;
+    // A tracking ref that does not exist says nothing: this repository has
+    // never seen the branch, so it holds no opinion about it.
+    final seen = repository.refs.resolve(tracking);
+    if (seen == null) continue;
+    held[ref] = seen;
+  }
+  return held;
+}
+
+/// Why a rewind of [ref] is refused, or null when it may go ahead.
+///
+/// Reached only when the push is not a fast-forward, so the question is always
+/// whether the rewind is allowed rather than whether one is happening.
+String? _leaseRefusal(
+  Map<String, ObjectId?>? held,
+  String ref,
+  ObjectId? remoteHas,
+) {
+  if (held == null) return 'not a fast-forward';
+  if (!held.containsKey(ref)) {
+    return 'no lease: nothing recorded for $ref, so fetch first';
+  }
+  if (held[ref] != remoteHas) {
+    return 'stale info: the remote has moved since it was last fetched';
+  }
+  return null;
 }
 
 /// Every object reachable from [tips] that is not reachable from [have].
@@ -198,6 +291,7 @@ Future<PushResult> _pushLocal(
   Remote remote,
   Map<String, ObjectId> wanted,
   bool force,
+  Map<String, ObjectId?>? held,
   void Function(String)? onProgress,
 ) async {
   final target = Repository.discover(remote.localPath);
@@ -236,13 +330,16 @@ Future<PushResult> _pushLocal(
       if (before != null &&
           !force &&
           !_contains(repository, entry.value, before)) {
-        statuses.add(PushStatus(
-          ref: entry.key,
-          to: entry.value,
-          from: before,
-          rejected: 'not a fast-forward',
-        ));
-        continue;
+        final refusal = _leaseRefusal(held, entry.key, before);
+        if (refusal != null) {
+          statuses.add(PushStatus(
+            ref: entry.key,
+            to: entry.value,
+            from: before,
+            rejected: refusal,
+          ));
+          continue;
+        }
       }
       accepted[entry.key] = entry.value;
     }
@@ -264,16 +361,20 @@ Future<PushResult> _pushLocal(
       }
 
       accepted.forEach((ref, id) {
+        // A rewind is a rewind whether force or a lease allowed it, and the
+        // reflog is the only place it will be recorded.
+        final before = theirs[ref];
+        final rewound = before != null && !_contains(repository, id, before);
         target.refs.write(
           ref,
           id,
-          reflogMessage: 'push${force && theirs[ref] != null ? ' (forced)' : ''}',
+          reflogMessage: 'push${rewound ? ' (forced)' : ''}',
         );
         statuses.add(PushStatus(
           ref: ref,
           to: id,
-          from: theirs[ref],
-          forced: force && theirs[ref] != null,
+          from: before,
+          forced: rewound,
         ));
       });
       _updateTrackingRefs(repository, remote, accepted);
@@ -295,6 +396,7 @@ Future<PushResult> _pushHttp(
   Remote remote,
   Map<String, ObjectId> wanted,
   bool force,
+  Map<String, ObjectId?>? held,
   Credentials? given,
   void Function(String)? onProgress,
 ) async {
@@ -355,13 +457,16 @@ Future<PushResult> _pushHttp(
       if (before != null &&
           !force &&
           !_contains(repository, entry.value, before)) {
-        statuses.add(PushStatus(
-          ref: entry.key,
-          to: entry.value,
-          from: before,
-          rejected: 'not a fast-forward',
-        ));
-        continue;
+        final refusal = _leaseRefusal(held, entry.key, before);
+        if (refusal != null) {
+          statuses.add(PushStatus(
+            ref: entry.key,
+            to: entry.value,
+            from: before,
+            rejected: refusal,
+          ));
+          continue;
+        }
       }
       commands.add((ref: entry.key, from: before, to: entry.value));
     }
@@ -447,7 +552,9 @@ Future<PushResult> _pushHttp(
         to: command.to,
         from: command.from,
         rejected: refused,
-        forced: force && command.from != null,
+        // A rewind is a rewind whether force or a lease allowed it.
+        forced: command.from != null &&
+            !_contains(repository, command.to, command.from!),
       ));
     }
     _updateTrackingRefs(repository, remote, landed);

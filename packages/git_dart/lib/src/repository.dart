@@ -149,7 +149,10 @@ class Repository {
   /// The repository's config merged over the user's. Read once and kept: it
   /// is consulted on every status, and a file read per call would be the
   /// slowest thing in the loop.
-  GitConfig get config => _config ??= GitConfig.forRepository(commonDirectory);
+  GitConfig get config => _config ??= GitConfig.forRepository(
+        commonDirectory,
+        worktreeDirectory: gitDirectory,
+      );
 
   Mailmap? _mailmap;
 

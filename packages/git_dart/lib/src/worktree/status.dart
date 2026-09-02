@@ -153,6 +153,11 @@ RepositoryStatus statusOf(
 
   for (final entry in indexByPath.values) {
     if (conflicted.contains(entry.path)) continue;
+    // A skip-worktree entry is one the working tree is not expected to hold,
+    // which is the whole of what sparse checkout does. Comparing it against
+    // the disk would report every deliberately absent file as deleted, and a
+    // narrowed checkout would look like a repository somebody had emptied.
+    if (entry.skipWorktree) continue;
     final file = fs.file(
       p.join(workTree, entry.path.replaceAll('/', p.separator)),
     );
