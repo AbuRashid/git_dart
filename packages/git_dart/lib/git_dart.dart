@@ -18,6 +18,7 @@ export 'src/diff/tree_diff.dart';
 // filesystem, not something an importer should find in its own namespace.
 export 'src/fs/git_fs.dart' hide fs;
 export 'src/fs/io_git_fs.dart';
+export 'src/platform/http.dart';
 export 'src/graph/commit_graph.dart';
 export 'src/graph/graph_walks.dart';
 export 'src/index/git_index.dart';

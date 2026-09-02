@@ -11,6 +11,7 @@ import '../objects/tree.dart';
 import '../refs/reflog.dart';
 import '../repository.dart';
 import 'pack_writer.dart';
+import '../platform/host.dart';
 
 class RepackResult {
   /// Objects written into the new pack.
@@ -358,7 +359,7 @@ List<GitFsFile> _deleteAll(List<GitFsFile> files) {
     }
   }
 
-  if (stubborn.isEmpty || !Platform.isWindows) return gone;
+  if (stubborn.isEmpty || !isWindows) return gone;
 
   // One call over the shared root, rather than one per file.
   final roots = {for (final file in stubborn) p.dirname(file.path)};

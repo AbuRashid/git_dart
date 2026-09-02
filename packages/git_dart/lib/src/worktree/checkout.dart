@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
@@ -11,6 +10,7 @@ import '../objects/tree.dart';
 import '../repository.dart';
 import 'attributes.dart';
 import 'status.dart';
+import '../platform/host.dart';
 
 /// Thrown when a checkout would destroy work that is not committed.
 class CheckoutConflictException implements Exception {
@@ -182,7 +182,7 @@ bool _writeEntry(
   // dart:io cannot change a file's permissions, so the executable bit of
   // mode 100755 is not reproduced. On Windows there is nothing to reproduce;
   // elsewhere the file is written readable and not executable.
-  return !(mode == FileMode.executableFile && !Platform.isWindows);
+  return !(mode == FileMode.executableFile && !isWindows);
 }
 
 void _flattenTree(

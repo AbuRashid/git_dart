@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import '../fs/git_fs.dart';
 import '../object_id.dart';
+import '../platform/big_endian64.dart';
 
 /// The companion index of a packfile: object name to offset within the pack.
 ///
@@ -75,7 +76,7 @@ class PackIndex {
       } else {
         // The top bit means "look in the 64-bit table"; the rest is the index.
         final big = raw & 0x7fffffff;
-        offsets[i] = data.getUint64(bigOffsetsStart + big * 8);
+        offsets[i] = readUint64(data, bigOffsetsStart + big * 8);
       }
     }
 

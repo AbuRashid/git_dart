@@ -1,10 +1,10 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
 import '../config/git_config.dart';
 import '../fs/git_fs.dart';
+import '../platform/host.dart';
 
 /// One line of a `.gitignore`.
 class IgnorePattern {
@@ -203,9 +203,9 @@ IgnoreRules loadIgnoreRules(
 /// Where git looks when `core.excludesFile` is unset.
 List<String> get _defaultGlobalExcludePaths {
   final home =
-      Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+      environment['HOME'] ?? environment['USERPROFILE'];
   if (home == null) return const [];
-  final xdg = Platform.environment['XDG_CONFIG_HOME'];
+  final xdg = environment['XDG_CONFIG_HOME'];
   return [
     if (xdg != null) p.join(xdg, 'git', 'ignore'),
     p.join(home, '.config', 'git', 'ignore'),

@@ -26,6 +26,7 @@ import 'package:path/path.dart' as p;
 
 import '../fs/git_fs.dart';
 import '../object_id.dart';
+import '../platform/big_endian64.dart';
 
 /// What the file records about one commit.
 class CommitGraphEntry {
@@ -149,7 +150,7 @@ class CommitGraph {
         throw const FormatException('commit-graph chunk table is truncated');
       }
       final id = view.getUint32(at);
-      final offset = view.getUint64(at + 4);
+      final offset = readUint64(view, at + 4);
       chunks[id] = offset;
       at += 12;
     }
@@ -395,12 +396,12 @@ class CommitGraphWriter {
     var at = headerSize;
     for (final chunk in chunks) {
       view.setUint32(at, CommitGraph._chunkId(chunk));
-      view.setUint64(at + 4, offsets[chunk]!);
+      writeUint64(view, at + 4, offsets[chunk]!);
       at += 12;
     }
     // The table ends with a zero id whose offset marks where the chunks stop.
     view.setUint32(at, 0);
-    view.setUint64(at + 4, offset);
+    writeUint64(view, at + 4, offset);
 
     // ---- fanout ----
     at = offsets['OIDF']!;

@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart' show getCrc32;
@@ -8,6 +7,7 @@ import '../object_id.dart';
 import '../objects/git_object.dart';
 import 'delta.dart';
 import 'pack_index_writer.dart';
+import '../platform/compress.dart';
 
 /// A packfile and what a reader needs to index it.
 ///
@@ -184,7 +184,7 @@ class PackWriter {
         payload = delta;
         depth = base.depth + 1;
 
-        final compressed = zlib.encode(payload);
+        final compressed = deflate(payload);
         body
           ..add(header)
           ..add(distance)
@@ -206,7 +206,7 @@ class PackWriter {
         payload = object.content;
         depth = 0;
 
-        final compressed = zlib.encode(payload);
+        final compressed = deflate(payload);
         body
           ..add(header)
           ..add(compressed);

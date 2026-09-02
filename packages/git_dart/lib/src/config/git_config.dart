@@ -1,9 +1,9 @@
 import 'dart:convert';
-import 'dart:io';
 
 import '../fs/git_fs.dart';
 
 import 'package:path/path.dart' as p;
+import '../platform/host.dart';
 
 /// A git config file, and the ones it inherits from.
 ///
@@ -87,7 +87,6 @@ class GitConfig {
   /// both as git treats them, so a caller that wants a repeatable answer has
   /// git's own way of asking for one.
   static List<String> get systemConfigPaths {
-    final environment = Platform.environment;
     if (environment['GIT_CONFIG_NOSYSTEM'] case final suppressed?
         when suppressed.isNotEmpty && suppressed != '0') {
       return const [];
@@ -97,7 +96,7 @@ class GitConfig {
       return [override];
     }
 
-    if (Platform.isWindows) {
+    if (isWindows) {
       // Git for Windows keeps it under its own installation directory.
       final roots = <String>{
         if (environment['ProgramFiles'] case final path?) path,
@@ -112,7 +111,7 @@ class GitConfig {
   static List<String> get globalConfigPaths {
     final home = _home;
     if (home == null) return const [];
-    final xdg = Platform.environment['XDG_CONFIG_HOME'];
+    final xdg = environment['XDG_CONFIG_HOME'];
     return [
       if (xdg != null) p.join(xdg, 'git', 'config'),
       p.join(home, '.config', 'git', 'config'),
@@ -207,7 +206,7 @@ class GitConfig {
   }
 
   static String? get _home =>
-      Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+      environment['HOME'] ?? environment['USERPROFILE'];
 
   /// Expands the `~` git allows at the start of a path setting.
   static String expandHome(String path) {

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 import '../object_id.dart';
+import '../platform/big_endian64.dart';
 
 /// One object's place in a pack: its name, where it starts, and a checksum of
 /// the bytes as they were written.
@@ -126,7 +127,7 @@ class PackIndexWriter {
     }
 
     for (final offset in large) {
-      view.setUint64(at, offset);
+      writeUint64(view, at, offset);
       at += 8;
     }
 

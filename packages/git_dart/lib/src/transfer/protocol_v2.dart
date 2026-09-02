@@ -179,6 +179,8 @@ Uint8List fetchRequest({
   required List<ObjectId> wants,
   required List<ObjectId> haves,
   required bool done,
+  int? depth,
+  Set<ObjectId> shallow = const {},
   bool ofsDelta = true,
   bool includeTag = true,
   String agent = 'git/git_dart-0.1',
@@ -202,6 +204,20 @@ Uint8List fetchRequest({
   // Storing one as it arrives produces a pack whose bases are missing — which
   // the indexer refuses, correctly and unhelpfully. Asking for a complete
   // pack costs bandwidth and cannot be got subtly wrong.
+
+  // Where this repository's history already stops. Without these the server
+  // assumes everything behind a `have` is present and concludes there is
+  // nothing to send — so a deepening fetch of a shallow clone returns an empty
+  // pack and the boundary never moves.
+  for (final id in shallow) {
+    body.add(PktLine.text('shallow ${id.hex}\n').encode());
+  }
+
+  // How much history to ask for. The server answers with the commits whose
+  // parents it is not sending, which is what the receiver has to record.
+  if (depth != null) {
+    body.add(PktLine.text('deepen $depth\n').encode());
+  }
 
   for (final want in wants) {
     body.add(PktLine.text('want ${want.hex}\n').encode());
@@ -238,6 +254,43 @@ V2Section sectionNamed(String line) => switch (line.trim()) {
       'packfile' => V2Section.packfile,
       _ => V2Section.unknown,
     };
+
+/// A boundary the server reported: a commit whose parents it did not send,
+/// or one it has now sent the parents of.
+class ShallowUpdate {
+  final Set<ObjectId> shallow;
+  final Set<ObjectId> unshallow;
+
+  const ShallowUpdate({this.shallow = const {}, this.unshallow = const {}});
+
+  bool get isEmpty => shallow.isEmpty && unshallow.isEmpty;
+}
+
+/// Reads `shallow <oid>` and `unshallow <oid>` lines.
+///
+/// The two are opposites and both matter: `shallow` adds a commit to the
+/// boundary, and `unshallow` takes one off because the parents it was hiding
+/// have now arrived. A deepening fetch produces both at once, and applying
+/// only the first leaves a repository claiming a boundary it no longer has.
+ShallowUpdate parseShallow(Iterable<String> lines) {
+  final shallow = <ObjectId>{};
+  final unshallow = <ObjectId>{};
+
+  for (final raw in lines) {
+    final line = raw.trim();
+    if (line.startsWith('shallow ')) {
+      final hex = line.substring('shallow '.length).trim();
+      if (hex.length == ObjectId.hexLength) shallow.add(ObjectId.fromHex(hex));
+    } else if (line.startsWith('unshallow ')) {
+      final hex = line.substring('unshallow '.length).trim();
+      if (hex.length == ObjectId.hexLength) {
+        unshallow.add(ObjectId.fromHex(hex));
+      }
+    }
+  }
+
+  return ShallowUpdate(shallow: shallow, unshallow: unshallow);
+}
 
 /// The `Git-Protocol` header that asks a smart-HTTP server for version 2.
 ///

@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -6,6 +5,8 @@ import 'package:path/path.dart' as p;
 import '../fs/git_fs.dart';
 import '../object_id.dart';
 import '../objects/git_object.dart';
+import '../platform/compress.dart';
+import '../platform/host.dart';
 
 /// Objects stored one per file, zlib-deflated, under `objects/ab/cdef…`.
 ///
@@ -28,7 +29,7 @@ class LooseObjectStore {
   ({ObjectKind kind, Uint8List content})? read(ObjectId id) {
     final file = fs.file(pathFor(id));
     if (!file.existsSync()) return null;
-    final inflated = Uint8List.fromList(zlib.decode(file.readAsBytesSync()));
+    final inflated = Uint8List.fromList(inflate(file.readAsBytesSync()));
     return GitObject.split(inflated);
   }
 
@@ -43,8 +44,8 @@ class LooseObjectStore {
     file.parent.createSync(recursive: true);
     // Write to a temporary name and rename, so a reader never sees a partial
     // object under a name that promises complete content.
-    final temporary = fs.file('${file.path}.tmp${pid}_${object.hashCode}');
-    temporary.writeAsBytesSync(zlib.encode(object.serialise()));
+    final temporary = fs.file('${file.path}.tmp${processId}_${object.hashCode}');
+    temporary.writeAsBytesSync(deflate(object.serialise()));
     temporary.renameSync(file.path);
     return id;
   }

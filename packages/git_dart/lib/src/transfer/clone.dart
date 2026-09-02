@@ -53,6 +53,13 @@ class CloneDestinationException implements Exception {
   @override
   String toString() => 'cannot clone into $path: $message';
 }
+/// With [depth], only that many commits are asked for from each tip, and the
+/// commits at the edge have their parents withheld. What arrives is a working
+/// repository whose history stops — enough to build, browse and commit, and
+/// not enough to answer questions about how the code got that way. The
+/// boundary is recorded in `.git/shallow`, without which the missing parents
+/// would read as corruption rather than as a line someone drew.
+///
 
 /// Copies the repository at [url] into [path].
 ///
@@ -75,6 +82,7 @@ Future<CloneResult> clone(
   Credentials? credentials,
   void Function(String message)? onProgress,
   String sshCommand = 'ssh',
+  int? depth,
 }) async {
   final destination = p.absolute(path);
   final directory = fs.directory(destination);
@@ -102,6 +110,7 @@ Future<CloneResult> clone(
       credentials: credentials,
       onProgress: onProgress,
       sshCommand: sshCommand,
+      depth: depth,
     );
 
     final result = _adopt(repository, remote, fetched, bare, destination);

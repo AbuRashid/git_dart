@@ -141,6 +141,65 @@ class Repository {
     return _commitGraph = CommitGraph.open(gitDirectory);
   }
 
+  // ---- shallow ------------------------------------------------------------
+
+  /// The commits whose parents this repository deliberately does not have.
+  ///
+  /// A shallow clone stops at a chosen depth: the commits at the boundary
+  /// still name their parents, and those parents were never sent. Without a
+  /// record of which commits those are, the result is indistinguishable from a
+  /// corrupt repository — every tool that walks history would report a missing
+  /// object rather than an edge of a deliberate one. `.git/shallow` is that
+  /// record, and it is the whole of what makes a partial history legitimate
+  /// rather than broken.
+  Set<ObjectId> get shallowCommits {
+    final file = fs.file(p.join(gitDirectory, 'shallow'));
+    if (!file.existsSync()) return const {};
+    final out = <ObjectId>{};
+    for (final line in file.readAsLinesSync()) {
+      final text = line.trim();
+      if (text.length != ObjectId.hexLength) continue;
+      try {
+        out.add(ObjectId.fromHex(text));
+      } on FormatException {
+        // A line that is not a name is not a reason to refuse the repository.
+      }
+    }
+    return out;
+  }
+
+  bool get isShallow => shallowCommits.isNotEmpty;
+
+  /// Records the boundary, or removes the file when there is none left.
+  ///
+  /// Sorted, because git writes it sorted and a file that differs only in
+  /// order is a diff nobody wants to read.
+  void writeShallowCommits(Set<ObjectId> commits) {
+    final file = fs.file(p.join(gitDirectory, 'shallow'));
+    if (commits.isEmpty) {
+      // Deepening to the full history removes the boundary rather than
+      // leaving an empty file behind, which git treats as still shallow.
+      if (file.existsSync()) file.deleteSync();
+      return;
+    }
+    final sorted = commits.map((id) => id.hex).toList()..sort();
+    file.writeAsStringSync(sorted.join('\n') + '\n');
+  }
+
+  /// The parents of [commit] that this repository actually has.
+  ///
+  /// At a shallow boundary a commit still names parents that were never sent.
+  /// Every walk wants this rather than [Commit.parents], because the honest
+  /// answer to "what can I reach from here" stops at the edge of what is
+  /// present.
+  List<ObjectId> presentParentsOf(Commit commit) {
+    if (commit.parents.isEmpty) return const [];
+    return [
+      for (final parent in commit.parents)
+        if (objects.contains(parent)) parent,
+    ];
+  }
+
   /// Forgets the cached commit-graph, for a caller that has just written one.
   void reloadCommitGraph() {
     _lookedForCommitGraph = false;

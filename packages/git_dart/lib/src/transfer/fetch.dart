@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -21,6 +20,8 @@ import 'credentials.dart';
 import 'negotiator.dart';
 import 'pkt_line.dart';
 import 'protocol_v2.dart';
+import '../platform/host.dart';
+import '../platform/http.dart';
 
 /// One ref moved by a fetch.
 class RefUpdate {
@@ -103,8 +104,20 @@ Future<FetchResult> fetch(
   void Function(String message)? onProgress,
   String sshCommand = 'ssh',
   bool allowVersion2 = true,
+  int? depth,
 }) async {
   if (remote.isLocal) {
+    if (depth != null) {
+      // A local fetch copies objects straight out of the other repository's
+      // store rather than asking for them, so there is nobody to ask for a
+      // truncated history. Refused rather than silently ignored: a caller who
+      // asked for a shallow clone and got a complete one has been told
+      // something untrue about how much was downloaded.
+      throw UnsupportedError(
+        'a depth cannot be applied to a local fetch, which copies objects '
+        'directly rather than negotiating for them',
+      );
+    }
     return _fetchLocal(repository, remote, onProgress);
   }
   if (remote.url.startsWith('http://') || remote.url.startsWith('https://')) {
@@ -114,6 +127,7 @@ Future<FetchResult> fetch(
       credentials,
       onProgress,
       allowVersion2,
+      depth,
     );
   }
 
@@ -129,6 +143,7 @@ Future<FetchResult> fetch(
       connection,
       onProgress,
       allowVersion2,
+      depth,
     );
   }
 
@@ -266,6 +281,7 @@ Future<FetchResult> _fetchHttp(
   Credentials? given,
   void Function(String)? onProgress,
   bool allowVersion2,
+  int? depth,
 ) async {
   // A `user@host` URL carries the name but not the secret, and HttpClient
   // ignores both, so they are taken out here and sent as a header instead.
@@ -277,32 +293,29 @@ Future<FetchResult> _fetchHttp(
 
   final full = split.url.toString();
   final base = full.endsWith('/') ? full.substring(0, full.length - 1) : full;
-  final client = HttpClient();
+  final client = newHttpClient();
 
-  void authorise(HttpClientRequest request) {
-    request.headers.set('User-Agent', _agent);
-    if (allowVersion2) {
-      request.headers.set(gitProtocolHeader, gitProtocolVersion2);
-    }
-    if (credentials != null) {
-      request.headers.set(
-        HttpHeaders.authorizationHeader,
-        credentials.authorizationHeader,
-      );
-    }
-  }
+  Map<String, String> headersFor(Map<String, String> extra) => {
+        GitHttpHeaders.userAgent: _agent,
+        if (allowVersion2) gitProtocolHeader: gitProtocolVersion2,
+        if (credentials != null)
+          GitHttpHeaders.authorization: credentials.authorizationHeader,
+        ...extra,
+      };
 
-  Future<HttpClientResponse> post(List<int> body) async {
-    final request = await client.postUrl(Uri.parse('$base/git-upload-pack'));
-    request.headers
-      ..set('Content-Type', 'application/x-git-upload-pack-request')
-      ..set('Accept', 'application/x-git-upload-pack-result');
-    authorise(request);
-    request.add(body);
-
-    final response = await request.close();
+  Future<GitHttpResponse> post(List<int> body) async {
+    final url = Uri.parse('$base/git-upload-pack');
+    final response = await client.send(
+      method: 'POST',
+      url: url,
+      headers: headersFor({
+        GitHttpHeaders.contentType: 'application/x-git-upload-pack-request',
+        GitHttpHeaders.accept: 'application/x-git-upload-pack-result',
+      }),
+      body: body,
+    );
     if (response.statusCode == 401) {
-      await response.drain<void>();
+      await response.body.drain<void>();
       throw AuthenticationRequired(
         base,
         realm: realmOf(response),
@@ -310,9 +323,9 @@ Future<FetchResult> _fetchHttp(
       );
     }
     if (response.statusCode != 200) {
-      throw HttpException(
+      throw GitHttpException(
         'the server answered ${response.statusCode}',
-        uri: request.uri,
+        url: url,
       );
     }
     return response;
@@ -321,14 +334,14 @@ Future<FetchResult> _fetchHttp(
   try {
     // ---- the advertisement ----
     onProgress?.call('contacting $base');
-    final adRequest = await client.getUrl(
-      Uri.parse('$base/info/refs?service=git-upload-pack'),
+    final adUrl = Uri.parse('$base/info/refs?service=git-upload-pack');
+    final adResponse = await client.send(
+      method: 'GET',
+      url: adUrl,
+      headers: headersFor(const {}),
     );
-    authorise(adRequest);
-
-    final adResponse = await adRequest.close();
     if (adResponse.statusCode == 401) {
-      await adResponse.drain<void>();
+      await adResponse.body.drain<void>();
       throw AuthenticationRequired(
         base,
         realm: realmOf(adResponse),
@@ -336,13 +349,13 @@ Future<FetchResult> _fetchHttp(
       );
     }
     if (adResponse.statusCode != 200) {
-      throw HttpException(
+      throw GitHttpException(
         'the server answered ${adResponse.statusCode} for the ref '
         'advertisement',
-        uri: adRequest.uri,
+        url: adUrl,
       );
     }
-    final advertisement = await _collect(adResponse);
+    final advertisement = await _collect(adResponse.body);
 
     // A version 2 server answers the same request with its capabilities
     // instead of its refs. Which arrived is how the version is settled — the
@@ -355,7 +368,14 @@ Future<FetchResult> _fetchHttp(
     // below, and returning the future unawaited would close it out from under
     // the request it describes.
     if (v2.supportsFetch) {
-      return await _fetchHttpV2(repository, remote, v2, post, onProgress);
+      return await _fetchHttpV2(
+        repository,
+        remote,
+        v2,
+        post,
+        onProgress,
+        depth,
+      );
     }
     return await _fetchHttpV0(
       repository,
@@ -363,9 +383,10 @@ Future<FetchResult> _fetchHttp(
       advertisement,
       post,
       onProgress,
+      depth,
     );
   } finally {
-    client.close(force: true);
+    client.close();
   }
 }
 
@@ -379,14 +400,16 @@ Future<FetchResult> _fetchHttpV0(
   Repository repository,
   Remote remote,
   Uint8List advertisement,
-  Future<HttpClientResponse> Function(List<int>) post,
+  Future<GitHttpResponse> Function(List<int>) post,
   void Function(String)? onProgress,
+  int? depth,
 ) async {
   final parsed = _readAdvertisement(advertisement);
   final advertised = parsed.refs;
   final capabilities = parsed.capabilities;
 
-  final wants = _wantsFor(repository, remote, advertised);
+  final wants =
+      _wantsFor(repository, remote, advertised, deepening: depth != null);
   if (wants.isEmpty) {
     return FetchResult(
       updates: _applyRefspecs(repository, remote, advertised),
@@ -406,6 +429,13 @@ Future<FetchResult> _fetchHttpV0(
   final canNegotiate = capabilities.contains('multi_ack_detailed') ||
       capabilities.contains('multi_ack');
 
+  if (depth != null && !capabilities.contains('shallow')) {
+    throw UnsupportedError(
+      'this server does not offer shallow fetches, so a depth cannot be '
+      'honoured',
+    );
+  }
+
   Uint8List requestFor(List<ObjectId> haves, {required bool done}) {
     final body = BytesBuilder();
     for (var i = 0; i < wants.length; i++) {
@@ -414,6 +444,17 @@ Future<FetchResult> _fetchHttpV0(
             ? 'want ${wants[i].hex} ${agreed.join(' ')}\n'
             : 'want ${wants[i].hex}\n',
       ).encode());
+    }
+    // Where our history already stops, so the server does not assume we hold
+    // everything behind our `have` lines.
+    for (final id in repository.shallowCommits) {
+      body.add(PktLine.text('shallow ${id.hex}\n').encode());
+    }
+    // After the wants and before the flush that closes them: the server reads
+    // the whole want section before it answers, and a deepen line outside it
+    // is a protocol error rather than a request it ignores.
+    if (depth != null) {
+      body.add(PktLine.text('deepen $depth\n').encode());
     }
     body.add(PktLine.flush.encode());
     for (final have in haves) {
@@ -442,7 +483,7 @@ Future<FetchResult> _fetchHttpV0(
       onProgress?.call('negotiating (${told.length} offered)');
       final response = await post(requestFor(told, done: false));
       final reply = parseNegotiation(
-        _textPackets(await _collect(response)),
+        _textPackets(await _collect(response.body)),
       );
 
       for (final id in reply.acknowledged) {
@@ -462,9 +503,30 @@ Future<FetchResult> _fetchHttpV0(
   onProgress?.call('asking for ${wants.length} refs');
   final response = await post(requestFor(told, done: true));
 
+  // The boundary arrives ahead of the pack, unbanded, so the bytes have to be
+  // read once to find it and once to unpack — which is why this path buffers
+  // when a depth was asked for and streams when it was not.
+  if (depth != null) {
+    final whole = await _collect(response.body);
+    _recordShallow(repository, parseShallow(_textPackets(whole)));
+    final received = await _receivePack(
+      repository,
+      Stream.value(whole),
+      usedSideBand: sideBand,
+      onProgress: onProgress,
+    );
+    return FetchResult(
+      updates: _applyRefspecs(repository, remote, advertised),
+      objectsReceived: received,
+      advertised: advertised,
+      defaultBranch: parsed.symrefHead,
+      negotiationRounds: rounds,
+    );
+  }
+
   final received = await _receivePack(
     repository,
-    response,
+    response.body,
     usedSideBand: sideBand,
     onProgress: onProgress,
   );
@@ -483,8 +545,9 @@ Future<FetchResult> _fetchHttpV2(
   Repository repository,
   Remote remote,
   V2Capabilities capabilities,
-  Future<HttpClientResponse> Function(List<int>) post,
+  Future<GitHttpResponse> Function(List<int>) post,
   void Function(String)? onProgress,
+  int? depth,
 ) async {
   onProgress?.call('protocol version 2');
 
@@ -492,11 +555,11 @@ Future<FetchResult> _fetchHttpV2(
   // with very many refs this is the whole point of version 2.
   final prefixes = _prefixesFor(remote);
   final listed = parseLsRefs(
-    await _collect(await post(lsRefsRequest(prefixes: prefixes))),
+    await _collect((await post(lsRefsRequest(prefixes: prefixes))).body),
   );
   final advertised = listed.refs;
 
-  final wants = _wantsFor(repository, remote, advertised);
+  final wants = _wantsFor(repository, remote, advertised, deepening: depth != null);
   if (wants.isEmpty) {
     return FetchResult(
       updates: _applyRefspecs(repository, remote, advertised),
@@ -519,11 +582,13 @@ Future<FetchResult> _fetchHttpV2(
       rounds += 1;
 
       onProgress?.call('negotiating (${told.length} offered)');
-      final body = await _collect(await post(fetchRequest(
+      final body = await _collect((await post(fetchRequest(
         wants: wants,
         haves: told,
         done: false,
-      )));
+        depth: depth,
+        shallow: repository.shallowCommits,
+      ))).body);
 
       final reply = parseNegotiation(_textPackets(body));
       for (final id in reply.acknowledged) {
@@ -539,11 +604,35 @@ Future<FetchResult> _fetchHttpV2(
     wants: wants,
     haves: told,
     done: true,
+    depth: depth,
+    shallow: repository.shallowCommits,
   ));
+
+  // Version 2 names its sections, so the boundary is read from `shallow-info`
+  // rather than guessed at from position.
+  if (depth != null) {
+    final whole = await _collect(response.body);
+    _recordShallow(repository, parseShallow(_textPackets(whole)));
+    final received = await _receivePack(
+      repository,
+      Stream.value(whole),
+      usedSideBand: true,
+      version2: true,
+      onProgress: onProgress,
+    );
+    return FetchResult(
+      updates: _applyRefspecs(repository, remote, advertised),
+      objectsReceived: received,
+      advertised: advertised,
+      defaultBranch: listed.defaultBranch,
+      protocolVersion: 2,
+      negotiationRounds: rounds,
+    );
+  }
 
   final received = await _receivePack(
     repository,
-    response,
+    response.body,
     usedSideBand: true,
     version2: true,
     onProgress: onProgress,
@@ -571,7 +660,21 @@ Future<FetchResult> _fetchOverConnection(
   PacketConnection connection,
   void Function(String)? onProgress,
   bool allowVersion2,
+  int? depth,
 ) async {
+  if (depth != null) {
+    // The deepen exchange is implemented for smart HTTP and not yet for a
+    // duplex connection, where the shallow lines arrive interleaved with the
+    // negotiation rather than in one buffered response. Refused rather than
+    // dropped: a caller who asked for a shallow clone and silently received a
+    // complete one has been misled about what was downloaded.
+    await connection.close();
+    throw UnsupportedError(
+      'a depth is supported over http(s); ssh and git:// fetch the whole '
+      'history',
+    );
+  }
+
   try {
     // ---- what the server opened with ----
     final opening = <PktLine>[];
@@ -633,7 +736,8 @@ Future<FetchResult> _fetchConnectionV0(
   final advertised = parsed.refs;
   final capabilities = parsed.capabilities;
 
-  final wants = _wantsFor(repository, remote, advertised);
+  final wants =
+      _wantsFor(repository, remote, advertised);
   if (wants.isEmpty) {
     // Nothing to ask for: the server is told so rather than left waiting.
     connection.send(PktLine.flush.encode());
@@ -897,6 +1001,21 @@ Stream<List<int>> _packPacketsFrom(
 // shared
 // ---------------------------------------------------------------------------
 
+/// Applies what the server said about the shallow boundary.
+///
+/// `shallow` adds a commit whose parents were not sent; `unshallow` removes
+/// one because they since have been. Both are applied to what the repository
+/// already recorded, because a deepening fetch reports only what changed —
+/// replacing the file with just this round's `shallow` lines would forget
+/// every boundary the earlier fetches established.
+void _recordShallow(Repository repository, ShallowUpdate update) {
+  if (update.isEmpty) return;
+  final boundary = {...repository.shallowCommits}
+    ..addAll(update.shallow)
+    ..removeAll(update.unshallow);
+  repository.writeShallowCommits(boundary);
+}
+
 /// The ref prefixes this remote's refspecs could match, for `ls-refs`.
 List<String> _prefixesFor(Remote remote) {
   final prefixes = <String>{};
@@ -923,12 +1042,17 @@ List<String> _prefixesFor(Remote remote) {
 List<ObjectId> _wantsFor(
   Repository repository,
   Remote remote,
-  Map<String, ObjectId> advertised,
-) {
+  Map<String, ObjectId> advertised, {
+  bool deepening = false,
+}) {
   final wants = <ObjectId>[];
   for (final entry in advertised.entries) {
     if (remote.trackingRefFor(entry.key) == null) continue;
-    if (repository.objects.contains(entry.value)) continue;
+    // Already here, so ordinarily there is nothing to ask for. A deepening
+    // fetch is the exception: it wants the same tip and more of the history
+    // behind it, and skipping the want because the tip is present asks for
+    // nothing at all — which is how a deepen silently did nothing.
+    if (!deepening && repository.objects.contains(entry.value)) continue;
     if (!wants.contains(entry.value)) wants.add(entry.value);
   }
   return wants;
@@ -955,7 +1079,7 @@ Future<int> _receivePack(
     repository.gitDirectory,
     'objects',
     'pack',
-    'incoming-$pid.pack',
+    'incoming-$processId.pack',
   ))
     ..parent.createSync(recursive: true);
 
@@ -1091,9 +1215,13 @@ Future<int> _streamPackTo(
               'the server reported: ${utf8.decode(rest, allowMalformed: true)}',
             );
           default:
-            // Before the pack, the server sends NAK/ACK unbanded.
+            // Not every packet before the pack is banded. Version 0 sends the
+            // acknowledgements and the shallow boundary as plain lines, so
+            // their first byte is a letter rather than a band number — 's' for
+            // `shallow` reads as band 115, which is how this was found.
             final text = utf8.decode(packet.payload, allowMalformed: true);
-            if (!text.startsWith('NAK') && !text.startsWith('ACK')) {
+            const unbanded = ['NAK', 'ACK', 'shallow ', 'unshallow '];
+            if (!unbanded.any(text.startsWith)) {
               throw FormatException('unknown side band $band');
             }
         }

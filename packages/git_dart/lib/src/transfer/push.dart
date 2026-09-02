@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import '../object_id.dart';
@@ -13,6 +12,7 @@ import '../repository.dart';
 import '../storage/pack_writer.dart';
 import 'credentials.dart';
 import 'pkt_line.dart';
+import '../platform/http.dart';
 
 /// What happened to one ref.
 class PushStatus {
@@ -308,23 +308,25 @@ Future<PushResult> _pushHttp(
 
   final full = split.url.toString();
   final base = full.endsWith('/') ? full.substring(0, full.length - 1) : full;
-  final client = HttpClient();
+  final client = newHttpClient();
+
+  Map<String, String> headersFor(Map<String, String> extra) => {
+        GitHttpHeaders.userAgent: 'git/git_dart-0.1',
+        if (credentials != null)
+          GitHttpHeaders.authorization: credentials.authorizationHeader,
+        ...extra,
+      };
 
   try {
     onProgress?.call('contacting $base');
-    final adRequest = await client.getUrl(
-      Uri.parse('$base/info/refs?service=git-receive-pack'),
+    final adUrl = Uri.parse('$base/info/refs?service=git-receive-pack');
+    final adResponse = await client.send(
+      method: 'GET',
+      url: adUrl,
+      headers: headersFor(const {}),
     );
-    adRequest.headers.set('User-Agent', 'git/git_dart-0.1');
-    if (credentials != null) {
-      adRequest.headers.set(
-        HttpHeaders.authorizationHeader,
-        credentials.authorizationHeader,
-      );
-    }
-    final adResponse = await adRequest.close();
     if (adResponse.statusCode == 401) {
-      await adResponse.drain<void>();
+      await adResponse.body.drain<void>();
       throw AuthenticationRequired(
         base,
         realm: realmOf(adResponse),
@@ -332,14 +334,14 @@ Future<PushResult> _pushHttp(
       );
     }
     if (adResponse.statusCode != 200) {
-      throw HttpException(
+      throw GitHttpException(
         'the server answered ${adResponse.statusCode} for the ref '
         'advertisement',
-        uri: adRequest.uri,
+        url: adUrl,
       );
     }
 
-    final advertisement = _readAdvertisement(await _collect(adResponse));
+    final advertisement = _readAdvertisement(await _collect(adResponse.body));
     final theirs = advertisement.refs;
     final capabilities = advertisement.capabilities;
 
@@ -405,22 +407,18 @@ Future<PushResult> _pushHttp(
     // The pack follows the commands directly, unframed.
     body.add(writer.build());
 
-    final request = await client.postUrl(Uri.parse('$base/git-receive-pack'));
-    request.headers
-      ..set('Content-Type', 'application/x-git-receive-pack-request')
-      ..set('Accept', 'application/x-git-receive-pack-result')
-      ..set('User-Agent', 'git/git_dart-0.1');
-    if (credentials != null) {
-      request.headers.set(
-        HttpHeaders.authorizationHeader,
-        credentials.authorizationHeader,
-      );
-    }
-    request.add(body.takeBytes());
-
-    final response = await request.close();
+    final pushUrl = Uri.parse('$base/git-receive-pack');
+    final response = await client.send(
+      method: 'POST',
+      url: pushUrl,
+      headers: headersFor({
+        GitHttpHeaders.contentType: 'application/x-git-receive-pack-request',
+        GitHttpHeaders.accept: 'application/x-git-receive-pack-result',
+      }),
+      body: body.takeBytes(),
+    );
     if (response.statusCode == 401) {
-      await response.drain<void>();
+      await response.body.drain<void>();
       throw AuthenticationRequired(
         base,
         realm: realmOf(response),
@@ -428,13 +426,13 @@ Future<PushResult> _pushHttp(
       );
     }
     if (response.statusCode != 200) {
-      throw HttpException(
+      throw GitHttpException(
         'the server answered ${response.statusCode} for the push',
-        uri: request.uri,
+        url: pushUrl,
       );
     }
 
-    final report = _readReport(await _collect(response));
+    final report = _readReport(await _collect(response.body));
     if (report.unpackError != null) {
       throw StateError('the server could not unpack what was sent: '
           '${report.unpackError}');
@@ -457,7 +455,7 @@ Future<PushResult> _pushHttp(
     statuses.sort((a, b) => a.ref.compareTo(b.ref));
     return PushResult(statuses: statuses, objectsSent: writer.length);
   } finally {
-    client.close(force: true);
+    client.close();
   }
 }
 

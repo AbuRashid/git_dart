@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -7,6 +6,7 @@ import 'package:path/path.dart' as p;
 import '../config/git_config.dart';
 import '../diff/text_diff.dart';
 import '../fs/git_fs.dart';
+import '../platform/host.dart';
 
 /// What one `.gitattributes` line says about the paths it matches.
 class AttributeRule {
@@ -160,7 +160,7 @@ class Attributes {
     if (eol == 'crlf') return EolConversion.crlf;
     if (eol == 'lf') return EolConversion.lf;
     // `native`, which is what the platform does.
-    return Platform.isWindows ? EolConversion.crlf : EolConversion.lf;
+    return isWindows ? EolConversion.crlf : EolConversion.lf;
   }
 
   static AttributeRule? _compile(String line, String base) {

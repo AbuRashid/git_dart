@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:io';
+import '../platform/http.dart';
 
 /// A username and a secret for an HTTP remote.
 ///
@@ -74,8 +74,8 @@ class AuthenticationRequired implements Exception {
 }
 
 /// The realm from a `WWW-Authenticate` header, if it named one.
-String? realmOf(HttpClientResponse response) {
-  final header = response.headers.value(HttpHeaders.wwwAuthenticateHeader);
+String? realmOf(GitHttpResponse response) {
+  final header = response.header(GitHttpHeaders.wwwAuthenticate);
   if (header == null) return null;
   final match = RegExp('realm="([^"]*)"', caseSensitive: false)
       .firstMatch(header);
