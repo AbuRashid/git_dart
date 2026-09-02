@@ -116,10 +116,12 @@ class ObjectStore {
     required Uint8List packBytes,
     required List<PackedObject> objects,
     required ObjectId packChecksum,
+    bool promisor = false,
   }) =>
       _install(
         objects: objects,
         packChecksum: packChecksum,
+        promisor: promisor,
         place: (destination) => fs.file('$destination.tmp')
           ..writeAsBytesSync(packBytes, flush: true),
       );
@@ -134,10 +136,12 @@ class ObjectStore {
     required String packPath,
     required List<PackedObject> objects,
     required ObjectId packChecksum,
+    bool promisor = false,
   }) =>
       _install(
         objects: objects,
         packChecksum: packChecksum,
+        promisor: promisor,
         place: (_) => fs.file(packPath),
       );
 
@@ -150,6 +154,7 @@ class ObjectStore {
     required List<PackedObject> objects,
     required ObjectId packChecksum,
     required GitFsFile Function(String destination) place,
+    bool promisor = false,
   }) {
     if (objects.isEmpty) return null;
 
@@ -175,6 +180,15 @@ class ObjectStore {
       flush: true,
     );
     place(packPath).renameSync(packPath);
+
+    // A pack from a filtered fetch may reference objects nobody sent. The
+    // marker beside it is what tells every reader — git included — that those
+    // absences were promised rather than lost; without it the same repository
+    // reads as corrupt.
+    if (promisor) {
+      fs.file(p.join(directory.path, '$name.promisor'))
+          .writeAsStringSync('');
+    }
 
     final pack = PackFile.open(packPath);
     pack.externalBase = (id) {

@@ -105,8 +105,17 @@ Future<FetchResult> fetch(
   String sshCommand = 'ssh',
   bool allowVersion2 = true,
   int? depth,
+  String? filter,
 }) async {
   if (remote.isLocal) {
+    if (filter != null) {
+      // The same reasoning as a depth: a local fetch copies objects rather
+      // than asking for them, so there is nobody to apply a filter.
+      throw UnsupportedError(
+        'a filter cannot be applied to a local fetch, which copies objects '
+        'directly rather than negotiating for them',
+      );
+    }
     if (depth != null) {
       // A local fetch copies objects straight out of the other repository's
       // store rather than asking for them, so there is nobody to ask for a
@@ -128,6 +137,7 @@ Future<FetchResult> fetch(
       onProgress,
       allowVersion2,
       depth,
+      filter,
     );
   }
 
@@ -144,12 +154,57 @@ Future<FetchResult> fetch(
       onProgress,
       allowVersion2,
       depth,
+      filter,
     );
   }
 
   throw UnsupportedError(
     'no transport for ${remote.url}: this build speaks a local path, '
     'http(s), ssh and git://',
+  );
+}
+
+/// Fetches objects by name, rather than whatever the refs point at.
+///
+/// This is what makes a partial clone usable. A filtered fetch leaves the
+/// blobs behind as promises, and something eventually has to redeem them — a
+/// checkout needs the file contents at one commit, whatever the history was
+/// filtered down to. Git calls this a lazy fetch and does it from inside the
+/// checkout; this library's reads are synchronous, so the redeeming happens
+/// here, before the synchronous part begins.
+///
+/// The server has to be willing to hand over objects by name. Most are for
+/// objects reachable from what it already advertised, which is the only case
+/// this needs.
+Future<FetchResult> fetchObjects(
+  Repository repository,
+  Remote remote,
+  Iterable<ObjectId> objects, {
+  Credentials? credentials,
+  void Function(String message)? onProgress,
+  String? filter,
+}) async {
+  final wanted = {
+    for (final id in objects)
+      if (!repository.objects.contains(id)) id,
+  };
+  if (wanted.isEmpty) {
+    return const FetchResult(updates: [], objectsReceived: 0);
+  }
+  if (!remote.url.startsWith('http://') && !remote.url.startsWith('https://')) {
+    throw UnsupportedError(
+      'objects can be fetched by name over http(s); ${remote.url} is not',
+    );
+  }
+  return _fetchHttp(
+    repository,
+    remote,
+    credentials,
+    onProgress,
+    true,
+    null,
+    filter,
+    wanted,
   );
 }
 
@@ -282,7 +337,9 @@ Future<FetchResult> _fetchHttp(
   void Function(String)? onProgress,
   bool allowVersion2,
   int? depth,
-) async {
+  String? filter, [
+  Set<ObjectId>? explicitWants,
+]) async {
   // A `user@host` URL carries the name but not the secret, and HttpClient
   // ignores both, so they are taken out here and sent as a header instead.
   final split = splitCredentials(remote.url);
@@ -375,6 +432,8 @@ Future<FetchResult> _fetchHttp(
         post,
         onProgress,
         depth,
+        filter,
+        explicitWants,
       );
     }
     return await _fetchHttpV0(
@@ -384,6 +443,8 @@ Future<FetchResult> _fetchHttp(
       post,
       onProgress,
       depth,
+      filter,
+      explicitWants,
     );
   } finally {
     client.close();
@@ -403,12 +464,14 @@ Future<FetchResult> _fetchHttpV0(
   Future<GitHttpResponse> Function(List<int>) post,
   void Function(String)? onProgress,
   int? depth,
-) async {
+  String? filter, [
+  Set<ObjectId>? explicitWants,
+]) async {
   final parsed = _readAdvertisement(advertisement);
   final advertised = parsed.refs;
   final capabilities = parsed.capabilities;
 
-  final wants =
+  final wants = explicitWants?.toList() ??
       _wantsFor(repository, remote, advertised, deepening: depth != null);
   if (wants.isEmpty) {
     return FetchResult(
@@ -424,6 +487,11 @@ Future<FetchResult> _fetchHttpV0(
     if (sideBand) 'side-band-64k',
     if (capabilities.contains('ofs-delta')) 'ofs-delta',
     if (capabilities.contains('multi_ack_detailed')) 'multi_ack_detailed',
+    // Version 0 negotiates capabilities on the first want line, so asking for
+    // a filter takes both this and the `filter` line below. With only the
+    // line, the server ignores it, sends nothing, and the clone ends with an
+    // unborn HEAD — which is a long way from "the filter was not agreed".
+    if (filter != null) 'filter',
     'agent=$_agent',
   ];
   final canNegotiate = capabilities.contains('multi_ack_detailed') ||
@@ -432,6 +500,15 @@ Future<FetchResult> _fetchHttpV0(
   if (depth != null && !capabilities.contains('shallow')) {
     throw UnsupportedError(
       'this server does not offer shallow fetches, so a depth cannot be '
+      'honoured',
+    );
+  }
+  if (filter != null && !capabilities.contains('filter')) {
+    // `uploadpack.allowFilter` is off by default, so a server that has not
+    // opted in simply does not mention it. Sending the line anyway gets the
+    // whole repository and a caller who believes otherwise.
+    throw UnsupportedError(
+      'this server does not offer filtered fetches, so a filter cannot be '
       'honoured',
     );
   }
@@ -444,6 +521,9 @@ Future<FetchResult> _fetchHttpV0(
             ? 'want ${wants[i].hex} ${agreed.join(' ')}\n'
             : 'want ${wants[i].hex}\n',
       ).encode());
+    }
+    if (filter != null) {
+      body.add(PktLine.text('filter $filter\n').encode());
     }
     // Where our history already stops, so the server does not assume we hold
     // everything behind our `have` lines.
@@ -513,6 +593,7 @@ Future<FetchResult> _fetchHttpV0(
       repository,
       Stream.value(whole),
       usedSideBand: sideBand,
+      promisor: filter != null,
       onProgress: onProgress,
     );
     return FetchResult(
@@ -528,6 +609,7 @@ Future<FetchResult> _fetchHttpV0(
     repository,
     response.body,
     usedSideBand: sideBand,
+    promisor: filter != null,
     onProgress: onProgress,
   );
 
@@ -548,8 +630,17 @@ Future<FetchResult> _fetchHttpV2(
   Future<GitHttpResponse> Function(List<int>) post,
   void Function(String)? onProgress,
   int? depth,
-) async {
+  String? filter, [
+  Set<ObjectId>? explicitWants,
+]) async {
   onProgress?.call('protocol version 2');
+
+  if (filter != null && !capabilities.supportsFilter) {
+    throw UnsupportedError(
+      'this server does not offer filtered fetches, so a filter cannot be '
+      'honoured',
+    );
+  }
 
   // Only the refs this remote's refspecs could possibly use. On a repository
   // with very many refs this is the whole point of version 2.
@@ -559,7 +650,8 @@ Future<FetchResult> _fetchHttpV2(
   );
   final advertised = listed.refs;
 
-  final wants = _wantsFor(repository, remote, advertised, deepening: depth != null);
+  final wants = explicitWants?.toList() ??
+      _wantsFor(repository, remote, advertised, deepening: depth != null);
   if (wants.isEmpty) {
     return FetchResult(
       updates: _applyRefspecs(repository, remote, advertised),
@@ -588,6 +680,7 @@ Future<FetchResult> _fetchHttpV2(
         done: false,
         depth: depth,
         shallow: repository.shallowCommits,
+        filter: filter,
       ))).body);
 
       final reply = parseNegotiation(_textPackets(body));
@@ -606,6 +699,7 @@ Future<FetchResult> _fetchHttpV2(
     done: true,
     depth: depth,
     shallow: repository.shallowCommits,
+    filter: filter,
   ));
 
   // Version 2 names its sections, so the boundary is read from `shallow-info`
@@ -618,6 +712,7 @@ Future<FetchResult> _fetchHttpV2(
       Stream.value(whole),
       usedSideBand: true,
       version2: true,
+      promisor: filter != null,
       onProgress: onProgress,
     );
     return FetchResult(
@@ -635,6 +730,7 @@ Future<FetchResult> _fetchHttpV2(
     response.body,
     usedSideBand: true,
     version2: true,
+    promisor: filter != null,
     onProgress: onProgress,
   );
 
@@ -661,7 +757,14 @@ Future<FetchResult> _fetchOverConnection(
   void Function(String)? onProgress,
   bool allowVersion2,
   int? depth,
+  String? filter,
 ) async {
+  if (filter != null) {
+    await connection.close();
+    throw UnsupportedError(
+      'a filter is supported over http(s); ssh and git:// fetch everything',
+    );
+  }
   if (depth != null) {
     // The deepen exchange is implemented for smart HTTP and not yet for a
     // duplex connection, where the shallow lines arrive interleaved with the
@@ -1069,6 +1172,7 @@ Future<int> _receivePack(
   required bool usedSideBand,
   bool version2 = false,
   bool framed = true,
+  bool promisor = false,
   void Function(String)? onProgress,
 }) async {
   // Written to disk as it arrives rather than assembled in memory. The
@@ -1099,7 +1203,12 @@ Future<int> _receivePack(
     onProgress?.call('indexing');
     final indexed = PackIndexer(temporary.path).run();
 
-    if (indexed.count <= unpackLimit) {
+    // A filtered fetch is always kept as a pack, however few objects it
+    // brought. The marker that says its absences were promised sits *beside a
+    // pack*; there is nowhere to record it for a loose object, so unpacking a
+    // small filtered fetch would silently turn a partial repository into a
+    // corrupt-looking one.
+    if (indexed.count <= unpackLimit && !promisor) {
       // A handful of objects are cheaper to read loose than through an index,
       // and a pack of three objects is mostly header.
       final objects = PackParser(temporary.readAsBytesSync()).parse();
@@ -1111,6 +1220,7 @@ Future<int> _receivePack(
         packPath: temporary.path,
         objects: indexed.objects,
         packChecksum: indexed.checksum,
+        promisor: promisor,
       );
     }
     return indexed.count;

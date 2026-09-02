@@ -35,6 +35,14 @@ class V2Capabilities {
   /// wrong whenever two branches point at the same commit.
   bool get canReportSymrefs => has('ls-refs');
 
+  /// Whether the server will apply an object filter.
+  ///
+  /// Off by default in git — `uploadpack.allowFilter` has to be set — so a
+  /// server that has not opted in simply does not list it, and asking anyway
+  /// quietly returns everything.
+  bool get supportsFilter =>
+      commands['fetch']?.contains('filter') ?? false;
+
   /// Whether the server will accept `have` lines and answer with
   /// acknowledgements rather than simply sending everything.
   bool get canNegotiate {
@@ -181,6 +189,7 @@ Uint8List fetchRequest({
   required bool done,
   int? depth,
   Set<ObjectId> shallow = const {},
+  String? filter,
   bool ofsDelta = true,
   bool includeTag = true,
   String agent = 'git/git_dart-0.1',
@@ -204,6 +213,14 @@ Uint8List fetchRequest({
   // Storing one as it arrives produces a pack whose bases are missing — which
   // the indexer refuses, correctly and unhelpfully. Asking for a complete
   // pack costs bandwidth and cannot be got subtly wrong.
+
+  // What not to send. `blob:none` asks for the commits and trees and none of
+  // the file contents, which is what makes a partial clone cost the shape of
+  // the history rather than all of its data. The objects are not gone: they
+  // are promised, to be fetched when something actually needs them.
+  if (filter != null) {
+    body.add(PktLine.text('filter $filter\n').encode());
+  }
 
   // Where this repository's history already stops. Without these the server
   // assumes everything behind a `have` is present and concludes there is

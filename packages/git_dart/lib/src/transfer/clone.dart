@@ -7,6 +7,8 @@ import '../remote/remote.dart';
 import '../repository.dart';
 import 'credentials.dart';
 import 'fetch.dart';
+import '../config/config_writer.dart';
+import '../objects/tree.dart';
 
 /// What a clone left on disk.
 class CloneResult {
@@ -83,6 +85,7 @@ Future<CloneResult> clone(
   void Function(String message)? onProgress,
   String sshCommand = 'ssh',
   int? depth,
+  String? filter,
 }) async {
   final destination = p.absolute(path);
   final directory = fs.directory(destination);
@@ -104,6 +107,22 @@ Future<CloneResult> clone(
     repository.remotes.add(remoteName, url);
     final remote = repository.remotes.named(remoteName)!;
 
+    if (filter != null) {
+      // What makes the result a *partial* repository rather than a broken
+      // one. Git refuses to treat missing objects as promised unless the
+      // format version admits extensions and the remote is marked as the one
+      // that owes them, so this has to be written before anything arrives.
+      final writer = ConfigWriter(repository.gitDirectory);
+      writer.set('core.repositoryformatversion', '1', ConfigScope.local);
+      writer.set('remote.$remoteName.promisor', 'true', ConfigScope.local);
+      writer.set(
+        'remote.$remoteName.partialclonefilter',
+        filter,
+        ConfigScope.local,
+      );
+      repository.reloadConfig();
+    }
+
     final fetched = await fetch(
       repository,
       remote,
@@ -111,7 +130,22 @@ Future<CloneResult> clone(
       onProgress: onProgress,
       sshCommand: sshCommand,
       depth: depth,
+      filter: filter,
     );
+
+    // A filtered fetch left the file contents behind as promises. The
+    // checkout below is synchronous and cannot go back to the server, so the
+    // blobs it will need are redeemed now, in one request, while there is
+    // still somewhere asynchronous to do it from.
+    if (filter != null && !bare) {
+      await _redeemForCheckout(
+        repository,
+        remote,
+        fetched,
+        credentials: credentials,
+        onProgress: onProgress,
+      );
+    }
 
     final result = _adopt(repository, remote, fetched, bare, destination);
     finished = true;
@@ -135,6 +169,61 @@ Future<CloneResult> clone(
       }
     }
   }
+}
+
+/// Fetches the blobs the initial checkout will read.
+///
+/// Only the ones at the branch being checked out, which is the whole saving: a
+/// partial clone still holds every version of the *history* and only one
+/// version of each *file*. Asking for them together rather than one at a time
+/// is the difference between one request and thousands.
+Future<void> _redeemForCheckout(
+  Repository repository,
+  Remote remote,
+  FetchResult fetched, {
+  Credentials? credentials,
+  void Function(String message)? onProgress,
+}) async {
+  final heads = {
+    for (final entry in fetched.advertised.entries)
+      if (entry.key.startsWith('refs/heads/')) entry.key: entry.value,
+  };
+  if (heads.isEmpty) return;
+
+  final branch = _branchToAdopt(heads.keys, fetched.defaultBranch);
+  final tip = _tipFor(repository, remote, branch, heads);
+  if (tip == null) return;
+
+  final tree = repository.treeOf(tip);
+  if (tree == null) return;
+
+  final needed = <ObjectId>{};
+  void walk(Tree tree) {
+    for (final entry in tree.entries) {
+      if (entry.mode.isSubmodule) continue;
+      if (entry.mode.isTree) {
+        // A tree that is itself missing cannot be walked into; a filter that
+        // withheld trees is not one this redeems.
+        final raw = repository.objects.readRaw(entry.id);
+        if (raw == null) continue;
+        walk(repository.objects.readTyped<Tree>(entry.id));
+        continue;
+      }
+      if (!repository.objects.contains(entry.id)) needed.add(entry.id);
+    }
+  }
+
+  walk(tree);
+  if (needed.isEmpty) return;
+
+  onProgress?.call('fetching ${needed.length} promised objects');
+  await fetchObjects(
+    repository,
+    remote,
+    needed,
+    credentials: credentials,
+    onProgress: onProgress,
+  );
 }
 
 /// Points the new repository at what arrived: HEAD, a local branch, and the
