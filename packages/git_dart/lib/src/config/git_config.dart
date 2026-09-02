@@ -25,11 +25,28 @@ class GitConfig {
 
   /// The last value set for [key], or null. Last wins, which is how a
   /// repository's config overrides the user's.
-  String? operator [](String key) => _values[key]?.last;
+  String? operator [](String key) => _values[_normalise(key)]?.last;
 
   /// Every value for [key], in order. Some keys are legitimately repeated —
   /// a remote's fetch refspecs, for one.
-  List<String> all(String key) => _values[key] ?? const [];
+  List<String> all(String key) => _values[_normalise(key)] ?? const [];
+
+  /// A key as it is stored, so a caller can write `core.notesRef` the way git
+  /// documents it and still find `core.notesref`.
+  ///
+  /// git folds case for the section and the variable and not for a subsection
+  /// between them: `remote.Origin.url` and `remote.origin.url` are two
+  /// different remotes, while `core.notesRef` and `core.notesref` are one key.
+  /// Found by looking up `core.notesRef` and reliably getting nothing.
+  static String _normalise(String key) {
+    final parts = key.split('.');
+    if (parts.length < 2) return key.toLowerCase();
+    return [
+      parts.first.toLowerCase(),
+      ...parts.sublist(1, parts.length - 1),
+      parts.last.toLowerCase(),
+    ].join('.');
+  }
 
   bool? boolean(String key) {
     final value = this[key]?.toLowerCase();
