@@ -303,6 +303,79 @@ void main() {
   });
 
   // -------------------------------------------------------------------------
+  group('a shallow fetch over a duplex connection', () {
+    late String sshCommand;
+
+    setUp(() {
+      final script = writeFakeSsh(scratch.path);
+      sshCommand = '"${Platform.resolvedExecutable}" "$script"';
+    });
+
+    test('a depth over ssh stops the history where asked', () async {
+      // The deepen reply arrives as its own exchange on an open connection
+      // rather than inside one buffered response, which is the whole reason
+      // this path is written separately from smart HTTP.
+      final path = emptyClone('ssh-shallow');
+      final repo = Repository.open(path);
+      repo.remotes.add('origin', 'user@somewhere:$originPath');
+
+      await fetch(
+        repo,
+        repo.remotes.named('origin')!,
+        sshCommand: sshCommand,
+        depth: 1,
+      );
+      expect(repo.isShallow, isTrue);
+      expect(repo.shallowCommits, isNotEmpty);
+      repo.close();
+
+      git(['fsck', '--no-progress'], cwd: path);
+      expect(
+        git(['rev-parse', '--is-shallow-repository'], cwd: path).trim(),
+        'true',
+      );
+      expect(
+        git(['rev-list', '--count', 'refs/remotes/origin/main'], cwd: path)
+            .trim(),
+        '1',
+      );
+    });
+
+    test('deepening over ssh moves the boundary back', () async {
+      final path = emptyClone('ssh-deepen');
+      var repo = Repository.open(path);
+      repo.remotes.add('origin', 'user@somewhere:$originPath');
+      await fetch(repo, repo.remotes.named('origin')!,
+          sshCommand: sshCommand, depth: 1);
+      final first = {...repo.shallowCommits};
+      repo.close();
+
+      repo = Repository.open(path);
+      await fetch(repo, repo.remotes.named('origin')!,
+          sshCommand: sshCommand, depth: 2);
+      expect(repo.shallowCommits, isNot(first));
+      repo.close();
+
+      expect(
+        git(['rev-list', '--count', 'refs/remotes/origin/main'], cwd: path)
+            .trim(),
+        '2',
+      );
+      git(['fsck', '--no-progress'], cwd: path);
+    });
+
+    test('a full fetch over ssh records no boundary', () async {
+      final path = emptyClone('ssh-full');
+      final repo = Repository.open(path);
+      repo.remotes.add('origin', 'user@somewhere:$originPath');
+      await fetch(repo, repo.remotes.named('origin')!,
+          sshCommand: sshCommand);
+      expect(repo.isShallow, isFalse);
+      repo.close();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   group('over the git daemon', () {
     late Process daemon;
     late int port;

@@ -12,6 +12,7 @@ library;
 
 export 'src/config/config_writer.dart';
 export 'src/config/git_config.dart';
+export 'src/diff/blame.dart';
 export 'src/diff/text_diff.dart';
 export 'src/diff/tree_diff.dart';
 // The `fs` getter stays internal: it is how this package reaches the

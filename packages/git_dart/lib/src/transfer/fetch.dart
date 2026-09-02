@@ -192,6 +192,9 @@ Future<FetchResult> fetchObjects(
     return const FetchResult(updates: [], objectsReceived: 0);
   }
   if (!remote.url.startsWith('http://') && !remote.url.startsWith('https://')) {
+    // Only smart HTTP so far. Naming objects a server never advertised is the
+    // one exchange the duplex paths do not yet build, and asking for them by
+    // ref instead would fetch the wrong thing rather than fail.
     throw UnsupportedError(
       'objects can be fetched by name over http(s); ${remote.url} is not',
     );
@@ -759,25 +762,6 @@ Future<FetchResult> _fetchOverConnection(
   int? depth,
   String? filter,
 ) async {
-  if (filter != null) {
-    await connection.close();
-    throw UnsupportedError(
-      'a filter is supported over http(s); ssh and git:// fetch everything',
-    );
-  }
-  if (depth != null) {
-    // The deepen exchange is implemented for smart HTTP and not yet for a
-    // duplex connection, where the shallow lines arrive interleaved with the
-    // negotiation rather than in one buffered response. Refused rather than
-    // dropped: a caller who asked for a shallow clone and silently received a
-    // complete one has been misled about what was downloaded.
-    await connection.close();
-    throw UnsupportedError(
-      'a depth is supported over http(s); ssh and git:// fetch the whole '
-      'history',
-    );
-  }
-
   try {
     // ---- what the server opened with ----
     final opening = <PktLine>[];
@@ -814,6 +798,8 @@ Future<FetchResult> _fetchOverConnection(
         connection,
         v2,
         onProgress,
+        depth,
+        filter,
       );
     }
     return await _fetchConnectionV0(
@@ -822,6 +808,8 @@ Future<FetchResult> _fetchOverConnection(
       connection,
       advertisement,
       onProgress,
+      depth,
+      filter,
     );
   } finally {
     await connection.close();
@@ -834,13 +822,15 @@ Future<FetchResult> _fetchConnectionV0(
   PacketConnection connection,
   Uint8List advertisement,
   void Function(String)? onProgress,
+  int? depth,
+  String? filter,
 ) async {
   final parsed = _readAdvertisement(advertisement);
   final advertised = parsed.refs;
   final capabilities = parsed.capabilities;
 
   final wants =
-      _wantsFor(repository, remote, advertised);
+      _wantsFor(repository, remote, advertised, deepening: depth != null);
   if (wants.isEmpty) {
     // Nothing to ask for: the server is told so rather than left waiting.
     connection.send(PktLine.flush.encode());
@@ -853,11 +843,25 @@ Future<FetchResult> _fetchConnectionV0(
     );
   }
 
+  if (depth != null && !capabilities.contains('shallow')) {
+    throw UnsupportedError(
+      'this server does not offer shallow fetches, so a depth cannot be '
+      'honoured',
+    );
+  }
+  if (filter != null && !capabilities.contains('filter')) {
+    throw UnsupportedError(
+      'this server does not offer filtered fetches, so a filter cannot be '
+      'honoured',
+    );
+  }
+
   final sideBand = capabilities.contains('side-band-64k');
   final agreed = <String>[
     if (sideBand) 'side-band-64k',
     if (capabilities.contains('ofs-delta')) 'ofs-delta',
     if (capabilities.contains('multi_ack_detailed')) 'multi_ack_detailed',
+    if (filter != null) 'filter',
     'agent=$_agent',
   ];
 
@@ -868,8 +872,32 @@ Future<FetchResult> _fetchConnectionV0(
           : 'want ${wants[i].hex}\n',
     ).encode());
   }
+  if (filter != null) {
+    connection.send(PktLine.text('filter $filter\n').encode());
+  }
+  for (final id in repository.shallowCommits) {
+    connection.send(PktLine.text('shallow ${id.hex}\n').encode());
+  }
+  if (depth != null) {
+    connection.send(PktLine.text('deepen $depth\n').encode());
+  }
   connection.send(PktLine.flush.encode());
   await connection.flush();
+
+  // A deepen is answered before the negotiation begins: the server names the
+  // commits whose parents it is withholding, then falls silent again. On a
+  // duplex connection that reply is a section of its own rather than part of
+  // the buffered response smart HTTP returns, which is the whole reason this
+  // path needed writing separately.
+  if (depth != null) {
+    final lines = <String>[];
+    while (true) {
+      final packet = await connection.receive();
+      if (packet == null || packet.kind != PktKind.data) break;
+      lines.add(packet.text);
+    }
+    _recordShallow(repository, parseShallow(lines));
+  }
 
   // ---- negotiation, as a conversation ----
   final negotiator = Negotiator(repository);
@@ -921,12 +949,14 @@ Future<FetchResult> _fetchConnectionV0(
           _packPacketsFrom(connection, version2: false, onProgress: onProgress),
           usedSideBand: true,
           framed: false,
+          promisor: filter != null,
           onProgress: onProgress,
         )
       : await _receivePack(
           repository,
           connection.remaining,
           usedSideBand: false,
+          promisor: filter != null,
           onProgress: onProgress,
         );
 
@@ -945,8 +975,17 @@ Future<FetchResult> _fetchConnectionV2(
   PacketConnection connection,
   V2Capabilities capabilities,
   void Function(String)? onProgress,
+  int? depth,
+  String? filter,
 ) async {
   onProgress?.call('protocol version 2');
+
+  if (filter != null && !capabilities.supportsFilter) {
+    throw UnsupportedError(
+      'this server does not offer filtered fetches, so a filter cannot be '
+      'honoured',
+    );
+  }
 
   connection.send(lsRefsRequest(prefixes: _prefixesFor(remote)));
   await connection.flush();
@@ -960,7 +999,8 @@ Future<FetchResult> _fetchConnectionV2(
   final listed = parseLsRefs(listing.takeBytes());
   final advertised = listed.refs;
 
-  final wants = _wantsFor(repository, remote, advertised);
+  final wants =
+      _wantsFor(repository, remote, advertised, deepening: depth != null);
   if (wants.isEmpty) {
     return FetchResult(
       updates: _applyRefspecs(repository, remote, advertised),
@@ -989,6 +1029,9 @@ Future<FetchResult> _fetchConnectionV2(
         wants: wants,
         haves: told,
         done: false,
+        depth: depth,
+        shallow: repository.shallowCommits,
+        filter: filter,
       ));
       await connection.flush();
 
@@ -1015,16 +1058,31 @@ Future<FetchResult> _fetchConnectionV2(
   }
 
   onProgress?.call('asking for ${wants.length} refs');
-  connection.send(fetchRequest(wants: wants, haves: told, done: true));
+  connection.send(fetchRequest(
+    wants: wants,
+    haves: told,
+    done: true,
+    depth: depth,
+    shallow: repository.shallowCommits,
+    filter: filter,
+  ));
   await connection.flush();
 
+  final control = <String>[];
   final received = await _receivePack(
     repository,
-    _packPacketsFrom(connection, version2: true, onProgress: onProgress),
+    _packPacketsFrom(
+      connection,
+      version2: true,
+      onProgress: onProgress,
+      onControlLine: control.add,
+    ),
     usedSideBand: true,
     framed: false,
+    promisor: filter != null,
     onProgress: onProgress,
   );
+  _recordShallow(repository, parseShallow(control));
 
   return FetchResult(
     updates: _applyRefspecs(repository, remote, advertised),
@@ -1052,6 +1110,7 @@ Stream<List<int>> _packPacketsFrom(
   PacketConnection connection, {
   required bool version2,
   void Function(String)? onProgress,
+  void Function(String)? onControlLine,
 }) async* {
   var inPack = !version2;
 
@@ -1070,8 +1129,11 @@ Stream<List<int>> _packPacketsFrom(
     if (version2 && !inPack) {
       // Version 2 names its sections, so the pack begins where it says it
       // does rather than wherever the acknowledgements happen to stop.
-      if (sectionNamed(packet.text.trim()) == V2Section.packfile) {
+      final text = packet.text.trim();
+      if (sectionNamed(text) == V2Section.packfile) {
         inPack = true;
+      } else {
+        onControlLine?.call(text);
       }
       continue;
     }
