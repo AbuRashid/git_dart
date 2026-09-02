@@ -203,6 +203,11 @@ Blame? blame(
   Commit commitFor(ObjectId id) =>
       commits[id] ??= repository.objects.readTyped<Commit>(id);
 
+  // Read once for the whole file: git shows blame under mailmapped names by
+  // default, and a listing that did not would disagree with `git blame` beside
+  // it about who wrote the line.
+  final mailmap = repository.mailmap;
+
   return Blame(
     path: path,
     at: head.id,
@@ -215,7 +220,7 @@ Blame? blame(
             number: i + 1,
             text: finalLines[i],
             commit: source.commit,
-            author: commit.author,
+            author: mailmap.resolve(commit.author),
             summary: commit.message.split('\n').first.trim(),
             originalNumber: source.line + 1,
           );

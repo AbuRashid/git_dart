@@ -18,6 +18,7 @@ import 'objects/identity.dart';
 import 'objects/tag.dart';
 import 'objects/tree.dart';
 import 'refs/ref_store.dart';
+import 'refs/mailmap.dart';
 import 'refs/reflog.dart';
 import 'remote/remote.dart';
 import 'storage/object_store.dart';
@@ -32,6 +33,17 @@ class Repository {
   /// The `.git` directory, or the repository itself when bare.
   final String gitDirectory;
 
+  /// The git directory holding everything this repository shares — objects,
+  /// refs, config. The same as [gitDirectory] except in a linked worktree.
+  ///
+  /// `git worktree add` gives a second checkout its own small git directory
+  /// under `.git/worktrees/<name>`, holding a HEAD and an index and a
+  /// `commondir` file naming where the real repository is. Reading such a
+  /// worktree without following that file finds no objects and no refs, and
+  /// reports a perfectly good checkout as an empty repository with every
+  /// tracked file newly added.
+  final String commonDirectory;
+
   /// The working tree root, or null for a bare repository.
   final String? workTree;
 
@@ -40,6 +52,7 @@ class Repository {
 
   Repository._({
     required this.gitDirectory,
+    required this.commonDirectory,
     required this.workTree,
     required this.objects,
     required this.refs,
@@ -90,6 +103,21 @@ class Repository {
     }
   }
 
+  /// Where a git directory's shared half is.
+  ///
+  /// A `commondir` file means this is a linked worktree and names the real
+  /// repository, usually relatively. Its absence means the ordinary case,
+  /// where a repository's own directory is both halves.
+  static String _commonDirectoryOf(String gitDirectory) {
+    final file = fs.file(p.join(gitDirectory, 'commondir'));
+    if (!file.existsSync()) return gitDirectory;
+    final target = file.readAsStringSync().trim();
+    if (target.isEmpty) return gitDirectory;
+    return p.normalize(
+      p.isAbsolute(target) ? target : p.join(gitDirectory, target),
+    );
+  }
+
   /// git's own test for a git directory: HEAD, an object store and a ref
   /// namespace. The three things a repository is.
   static bool _looksLikeGitDirectory(String path) =>
@@ -99,11 +127,13 @@ class Repository {
 
   /// Opens a known git directory without searching.
   factory Repository.at(String gitDirectory, {String? workTree}) {
-    final refs = RefStore(gitDirectory);
+    final commonDirectory = _commonDirectoryOf(gitDirectory);
+    final refs = RefStore(gitDirectory, commonDirectory: commonDirectory);
     final repository = Repository._(
       gitDirectory: gitDirectory,
+      commonDirectory: commonDirectory,
       workTree: workTree,
-      objects: ObjectStore.open(p.join(gitDirectory, 'objects')),
+      objects: ObjectStore.open(p.join(commonDirectory, 'objects')),
       refs: refs,
     );
     // The store asks at the moment of a move, so the timestamp is the move's
@@ -119,7 +149,16 @@ class Repository {
   /// The repository's config merged over the user's. Read once and kept: it
   /// is consulted on every status, and a file read per call would be the
   /// slowest thing in the loop.
-  GitConfig get config => _config ??= GitConfig.forRepository(gitDirectory);
+  GitConfig get config => _config ??= GitConfig.forRepository(commonDirectory);
+
+  Mailmap? _mailmap;
+
+  /// The `.mailmap` in force here, which says which identities are one person.
+  ///
+  /// Read once and kept: it is consulted per commit, and per line by [blame],
+  /// so re-reading the file each time would make the common case pay for a
+  /// feature most repositories do not use.
+  Mailmap get mailmap => _mailmap ??= Mailmap.forRepository(this);
 
   /// Forgets the cached [config], for a caller that has just changed it.
   void reloadConfig() {
@@ -138,8 +177,79 @@ class Repository {
   CommitGraph? get commitGraph {
     if (_lookedForCommitGraph) return _commitGraph;
     _lookedForCommitGraph = true;
-    return _commitGraph = CommitGraph.open(gitDirectory);
+    return _commitGraph = CommitGraph.open(commonDirectory);
   }
+
+  // ---- worktrees ----------------------------------------------------------
+
+  /// Whether this is a linked worktree rather than the repository itself.
+  bool get isLinkedWorktree => commonDirectory != gitDirectory;
+
+  /// The other checkouts of this repository, not counting the main one.
+  ///
+  /// `git worktree add` makes a second working tree sharing one object store,
+  /// so two branches can be checked out at once without a second clone. Each
+  /// gets a directory under `worktrees/`, and the `gitdir` file in it names
+  /// the checkout - which is the only link back, since the checkout knows
+  /// about the repository and not the reverse.
+  ///
+  /// Listed from whichever worktree is asked, because they share the record.
+  List<LinkedWorktree> get linkedWorktrees {
+    final root = fs.directory(p.join(commonDirectory, 'worktrees'));
+    if (!root.existsSync()) return const [];
+
+    final out = <LinkedWorktree>[];
+    for (final entry in root.listSync()) {
+      if (entry is! GitFsDirectory) continue;
+      final name = p.basename(entry.path);
+
+      // `gitdir` holds the path of the checkout's own `.git` file, so the
+      // checkout is its parent.
+      final pointer = fs.file(p.join(entry.path, 'gitdir'));
+      if (!pointer.existsSync()) continue;
+      final target = pointer.readAsStringSync().trim();
+      if (target.isEmpty) continue;
+      final path = p.dirname(p.normalize(target));
+
+      // A worktree whose directory has been deleted is still recorded until
+      // someone prunes it, and saying so is more use than hiding it.
+      final present = fs.directory(path).existsSync();
+
+      final headFile = fs.file(p.join(entry.path, 'HEAD'));
+      String? branch;
+      ObjectId? head;
+      if (headFile.existsSync()) {
+        final text = headFile.readAsStringSync().trim();
+        if (text.startsWith('ref:')) {
+          branch = text.substring(4).trim();
+          head = refs.resolve(branch);
+        } else if (text.length >= ObjectId.hexLength) {
+          try {
+            head = ObjectId.fromHex(text.substring(0, ObjectId.hexLength));
+          } on FormatException {
+            // A HEAD nothing can be made of leaves the worktree listed with
+            // no commit, which is the honest answer.
+          }
+        }
+      }
+
+      out.add(LinkedWorktree(
+        name: name,
+        path: path,
+        branch: branch,
+        head: head,
+        exists: present,
+        locked: fs.file(p.join(entry.path, 'locked')).existsSync(),
+      ));
+    }
+
+    out.sort((a, b) => a.name.compareTo(b.name));
+    return out;
+  }
+
+  /// Opens one of [linkedWorktrees].
+  Repository? openWorktree(LinkedWorktree worktree) =>
+      worktree.exists ? Repository.discover(worktree.path) : null;
 
   // ---- shallow ------------------------------------------------------------
 
@@ -153,7 +263,7 @@ class Repository {
   /// record, and it is the whole of what makes a partial history legitimate
   /// rather than broken.
   Set<ObjectId> get shallowCommits {
-    final file = fs.file(p.join(gitDirectory, 'shallow'));
+    final file = fs.file(p.join(commonDirectory, 'shallow'));
     if (!file.existsSync()) return const {};
     final out = <ObjectId>{};
     for (final line in file.readAsLinesSync()) {
@@ -175,7 +285,7 @@ class Repository {
   /// Sorted, because git writes it sorted and a file that differs only in
   /// order is a diff nobody wants to read.
   void writeShallowCommits(Set<ObjectId> commits) {
-    final file = fs.file(p.join(gitDirectory, 'shallow'));
+    final file = fs.file(p.join(commonDirectory, 'shallow'));
     if (commits.isEmpty) {
       // Deepening to the full history removes the boundary rather than
       // leaving an empty file behind, which git treats as still shallow.
@@ -214,7 +324,7 @@ class Repository {
   /// file on every status, checkout and add.
   Attributes get attributes => _attributes ??= workTree == null
       ? Attributes()
-      : loadAttributes(workTree!, gitDirectory, config: config);
+      : loadAttributes(workTree!, commonDirectory, config: config);
 
   void close() => objects.close();
 
@@ -244,7 +354,36 @@ class Repository {
   /// `<ref>@{n}` reads the reflog instead of the commit graph: it is where the
   /// ref was n moves ago, which is a different question from where it is n
   /// parents back and is the only way to name a commit nothing points at.
+  /// `@{-n}` reads the same log for a different fact — the branch checked out
+  /// n checkouts ago, which is what people mean by "the branch I was just on".
+  ///
+  /// A colon names something *inside* a revision rather than the revision
+  /// itself: `HEAD:lib/x.dart` is a blob, `HEAD:lib` is a tree, `:lib/x.dart`
+  /// is what the index holds and `:2:lib/x.dart` one side of a conflict.
+  /// `:/text` searches commit messages instead of names, for the common case
+  /// of remembering what a commit said and not what it was called.
   ObjectId? resolve(String revision) {
+    if (revision.isEmpty) return null;
+
+    if (revision.startsWith(':/')) {
+      return _resolveByMessage(revision.substring(2));
+    }
+
+    // Split at the *first* colon: everything after it is a path, and a path is
+    // allowed to contain the characters that would otherwise be navigation.
+    final colon = revision.indexOf(':');
+    if (colon >= 0) {
+      return _resolveInside(
+        revision.substring(0, colon),
+        revision.substring(colon + 1),
+      );
+    }
+
+    final previous = RegExp(r'^@\{-(\d+)\}$').firstMatch(revision);
+    if (previous != null) {
+      return _resolvePreviousCheckout(int.parse(previous.group(1)!));
+    }
+
     final reflog = RegExp(r'^(.*)@\{(\d+)\}$').firstMatch(revision);
     if (reflog != null) {
       final name = reflog.group(1)!;
@@ -290,6 +429,83 @@ class Repository {
       if (id == null) return null;
     }
     return id;
+  }
+
+  /// `<rev>:<path>` — the object at a path, rather than the revision itself.
+  ///
+  /// An empty revision means the index, which is a different place from any
+  /// tree: it is what would be committed, including a path that is staged and
+  /// not yet committed anywhere.
+  ObjectId? _resolveInside(String revision, String path) {
+    if (revision.isEmpty) return _resolveInIndex(path);
+
+    final id = resolve(revision);
+    if (id == null) return null;
+
+    // The empty path is the tree itself, which is how `HEAD:` names a tree
+    // without naming anything in it.
+    final tree = treeOf(id);
+    if (tree == null) return null;
+    if (path.isEmpty) return tree.id;
+
+    final entry = lookup(tree, path);
+    return entry?.id;
+  }
+
+  /// `:<path>`, and `:<stage>:<path>` for one side of a conflict.
+  ObjectId? _resolveInIndex(String path) {
+    var wanted = MergeStage.ordinary;
+    var name = path;
+
+    final staged = RegExp(r'^([0-3]):(.*)$').firstMatch(path);
+    if (staged != null) {
+      wanted = MergeStage.byValue(int.parse(staged.group(1)!));
+      name = staged.group(2)!;
+    }
+
+    final index = this.index;
+    if (index == null) return null;
+    for (final entry in index.entries) {
+      if (entry.path == name && entry.stage == wanted) return entry.id;
+    }
+    return null;
+  }
+
+  /// `:/text` — the newest commit reachable from HEAD whose message contains
+  /// the text.
+  ///
+  /// Matched as plain text, not as a pattern: git takes a regular expression
+  /// here, and quietly reading `a.b` as a pattern would return a commit the
+  /// caller did not name. A caller that wants a pattern has [log] to filter.
+  ObjectId? _resolveByMessage(String text) {
+    if (text.isEmpty) return null;
+    for (final commit in log()) {
+      if (commit.message.contains(text)) return commit.id;
+    }
+    return null;
+  }
+
+  /// `@{-n}` — where the branch checked out n checkouts ago now points.
+  ///
+  /// Read out of HEAD's reflog, which records each move as "checkout: moving
+  /// from <old> to <new>". Note this resolves the branch *now*, not where it
+  /// stood then: `@{-1}` means "that branch", and the branch may have moved.
+  ObjectId? _resolvePreviousCheckout(int n) {
+    if (n < 1) return null;
+
+    final log = refs.reflogFor('HEAD');
+    final moving = RegExp(r'^checkout: moving from (.+) to (.+)$');
+
+    var remaining = n;
+    for (var i = log.entries.length - 1; i >= 0; i--) {
+      final match = moving.firstMatch(log.entries[i].message);
+      if (match == null) continue;
+      remaining -= 1;
+      if (remaining > 0) continue;
+      // The name it moved *from* is the branch being asked about.
+      return _resolveName(match.group(1)!);
+    }
+    return null;
   }
 
   /// `<ref>@{n}`, trying the ref by every name a ref can be spelled by.
@@ -656,12 +872,12 @@ class Repository {
     // carrying it over is the difference between a rename and a delete
     // followed by a create. It is restored before the write below, so that
     // write's own entry appends to the history rather than starting a new one.
-    final log = fs.file(Reflog.pathOf(gitDirectory, 'refs/heads/$from'));
+    final log = fs.file(Reflog.pathOf(commonDirectory, 'refs/heads/$from'));
     final carried = log.existsSync() ? log.readAsStringSync() : null;
 
     refs.delete('refs/heads/$from');
     if (carried != null) {
-      fs.file(Reflog.pathOf(gitDirectory, 'refs/heads/$to'))
+      fs.file(Reflog.pathOf(commonDirectory, 'refs/heads/$to'))
         ..parent.createSync(recursive: true)
         ..writeAsStringSync(carried);
     }
@@ -692,7 +908,7 @@ class Repository {
 
   /// Moves a `[branch "from"]` section to `[branch "to"]`, keeping its lines.
   void _renameBranchConfig(String from, String to) {
-    final file = fs.file(p.join(gitDirectory, 'config'));
+    final file = fs.file(p.join(commonDirectory, 'config'));
     if (!file.existsSync()) return;
 
     final wanted = '[branch "$from"]';
@@ -722,7 +938,7 @@ class Repository {
 
   /// Drops a `[branch "name"]` section, as deleting a branch should.
   void _removeBranchConfig(String name) {
-    final file = fs.file(p.join(gitDirectory, 'config'));
+    final file = fs.file(p.join(commonDirectory, 'config'));
     if (!file.existsSync()) return;
 
     final kept = <String>[];
@@ -757,7 +973,7 @@ class Repository {
 
   // ---- remotes ------------------------------------------------------------
 
-  RemoteStore get remotes => RemoteStore(gitDirectory);
+  RemoteStore get remotes => RemoteStore(commonDirectory);
 
   /// What [ours] has that [theirs] does not, and the other way about.
   ///
@@ -906,7 +1122,7 @@ class Repository {
     if (commits.isEmpty) return 0;
 
     final bytes = CommitGraphWriter.build(commits);
-    final directory = fs.directory(p.join(gitDirectory, 'objects', 'info'))
+    final directory = fs.directory(p.join(commonDirectory, 'objects', 'info'))
       ..createSync(recursive: true);
     final path = p.join(directory.path, 'commit-graph');
 
@@ -950,7 +1166,7 @@ class Repository {
 
   /// Records that [branch] follows [ref] on [remote], as `--set-upstream` does.
   void setUpstream(String branch, String remote, String ref) {
-    final file = fs.file(p.join(gitDirectory, 'config'));
+    final file = fs.file(p.join(commonDirectory, 'config'));
     final existing = file.existsSync() ? file.readAsStringSync() : '';
     final separator = existing.isEmpty || existing.endsWith('\n') ? '' : '\n';
     file.writeAsStringSync(
@@ -1143,7 +1359,7 @@ class Repository {
 
   /// Every non-ignored, non-directory path under [directory], tracked or not.
   Iterable<String> _pathsUnder(String workTree, String directory) sync* {
-    final rules = loadIgnoreRules(workTree, gitDirectory, config: config);
+    final rules = loadIgnoreRules(workTree, commonDirectory, config: config);
     final root = fs.directory(
       p.join(workTree, directory.replaceAll('/', p.separator)),
     );
@@ -1526,4 +1742,46 @@ class Repository {
 
     return Repository.at(gitDirectory, workTree: bare ? null : root);
   }
+}
+
+/// A second checkout of one repository, made by `git worktree add`.
+class LinkedWorktree {
+  /// The name under `worktrees/`, which git derives from the directory but
+  /// which is not required to still match it.
+  final String name;
+
+  /// The checkout's directory.
+  final String path;
+
+  /// The branch it has checked out, as a full ref path, or null when its HEAD
+  /// is detached.
+  final String? branch;
+
+  /// The commit it is on.
+  final ObjectId? head;
+
+  /// Whether the directory is still there. A worktree whose directory was
+  /// deleted stays recorded until it is pruned.
+  final bool exists;
+
+  /// Whether it is marked locked, which asks other tools not to prune it -
+  /// the flag for a worktree on a drive that is not always mounted.
+  final bool locked;
+
+  const LinkedWorktree({
+    required this.name,
+    required this.path,
+    required this.exists,
+    required this.locked,
+    this.branch,
+    this.head,
+  });
+
+  bool get isDetached => branch == null;
+
+  String get shortBranch =>
+      branch == null ? 'detached' : branch!.split('/').last;
+
+  @override
+  String toString() => '$name -> $path (${isDetached ? 'detached' : branch})';
 }

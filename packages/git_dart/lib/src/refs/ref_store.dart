@@ -90,8 +90,18 @@ class Ref {
 /// read here and the caller is not told which it got, except through
 /// [Ref.packed], which exists for tooling rather than for logic.
 class RefStore {
-  /// The `.git` directory.
+  /// The `.git` directory. For a linked worktree this is its own
+  /// `.git/worktrees/<name>` directory, which holds only what belongs to that
+  /// worktree.
   final String gitDirectory;
+
+  /// Where the refs everyone shares live — the same as [gitDirectory] except
+  /// in a linked worktree, where it is the repository the worktree belongs to.
+  ///
+  /// Refs are shared: a branch is the same branch seen from any worktree. The
+  /// handful that are not shared are the ones that describe *where a worktree
+  /// is*, which is necessarily a different answer in each of them.
+  final String commonDirectory;
 
   /// Who to record as having moved a ref, asked for at the moment of the move
   /// so the timestamp is the move's own.
@@ -102,10 +112,35 @@ class RefStore {
   /// record and is not one.
   Identity? Function()? identityFor;
 
-  RefStore(this.gitDirectory, {this.identityFor});
+  RefStore(this.gitDirectory, {String? commonDirectory, this.identityFor})
+      : commonDirectory = commonDirectory ?? gitDirectory;
+
+  /// The names that belong to one worktree rather than to the repository.
+  ///
+  /// HEAD is the obvious one — two worktrees are checked out on two different
+  /// branches, and that is the entire point of having them. The rest are the
+  /// in-progress states of an operation running in this worktree, which
+  /// another worktree must not see and must not be able to trip over.
+  static bool _isPerWorktree(String refPath) =>
+      const {
+        'HEAD',
+        'ORIG_HEAD',
+        'FETCH_HEAD',
+        'MERGE_HEAD',
+        'CHERRY_PICK_HEAD',
+        'REVERT_HEAD',
+        'REBASE_HEAD',
+        'BISECT_HEAD',
+      }.contains(refPath) ||
+      refPath.startsWith('refs/bisect/') ||
+      refPath.startsWith('refs/worktree/') ||
+      refPath.startsWith('refs/rewritten/');
+
+  String _rootFor(String refPath) =>
+      _isPerWorktree(refPath) ? gitDirectory : commonDirectory;
 
   String _pathOf(String refPath) =>
-      p.join(gitDirectory, refPath.replaceAll('/', p.separator));
+      p.join(_rootFor(refPath), refPath.replaceAll('/', p.separator));
 
   /// Reads one ref without following symbolic targets. Returns null when the
   /// ref does not exist.
@@ -160,7 +195,7 @@ class RefStore {
   bool get isDetached => head?.target is DirectRef;
 
   Map<String, ObjectId> readPackedRefs() {
-    final file = fs.file(p.join(gitDirectory, 'packed-refs'));
+    final file = fs.file(p.join(commonDirectory, 'packed-refs'));
     if (!file.existsSync()) return const {};
 
     final refs = <String, ObjectId>{};
@@ -192,12 +227,12 @@ class RefStore {
 
     // A loose ref shadows the packed one of the same name: packed-refs is a
     // snapshot, and the loose file is what moved since.
-    final root = fs.directory(p.join(gitDirectory, 'refs'));
+    final root = fs.directory(p.join(commonDirectory, 'refs'));
     if (root.existsSync()) {
       for (final entry in root.listSync(recursive: true)) {
         if (entry is! GitFsFile) continue;
         final refPath =
-            p.relative(entry.path, from: gitDirectory).replaceAll(r'\', '/');
+            p.relative(entry.path, from: commonDirectory).replaceAll(r'\', '/');
         if (!refPath.startsWith(prefix)) continue;
         final ref = read(refPath);
         if (ref != null) found[refPath] = ref;
@@ -294,7 +329,12 @@ class RefStore {
     try {
       lock.createSync(exclusive: true);
     } on GitFsException {
-      throw RefLockedException(p.relative(file.path, from: gitDirectory));
+      // Named against whichever half of the repository the ref lives in, so
+      // the message reads as a ref path rather than as a path on disk.
+      final root = p.isWithin(commonDirectory, file.path)
+          ? commonDirectory
+          : gitDirectory;
+      throw RefLockedException(p.relative(file.path, from: root));
     }
     return lock;
   }
@@ -312,7 +352,7 @@ class RefStore {
       refPath.startsWith('refs/heads/') ||
       refPath.startsWith('refs/remotes/') ||
       refPath.startsWith('refs/notes/') ||
-      fs.file(Reflog.pathOf(gitDirectory, refPath)).existsSync();
+      fs.file(Reflog.pathOf(_rootFor(refPath), refPath)).existsSync();
 
   void _log(
     String refPath,
@@ -343,7 +383,7 @@ class RefStore {
   }
 
   void _appendReflog(String refPath, ReflogEntry entry) {
-    final file = fs.file(Reflog.pathOf(gitDirectory, refPath));
+    final file = fs.file(Reflog.pathOf(_rootFor(refPath), refPath));
     file.parent.createSync(recursive: true);
     // Append rather than rewrite: the log is the one part of a repository
     // where losing older lines defeats the purpose, and an append of one short
@@ -353,11 +393,12 @@ class RefStore {
 
   /// The recorded history of one ref, oldest first. Empty when nothing has
   /// been logged, which is not an error.
-  Reflog reflogFor(String refPath) => Reflog.read(gitDirectory, refPath);
+  Reflog reflogFor(String refPath) =>
+      Reflog.read(_rootFor(refPath), refPath);
 
   /// Every ref that has a reflog, by path.
   List<String> refsWithReflogs() {
-    final root = fs.directory(p.join(gitDirectory, 'logs'));
+    final root = fs.directory(p.join(commonDirectory, 'logs'));
     if (!root.existsSync()) return const [];
     return [
       for (final entry in root.listSync(recursive: true))
@@ -368,7 +409,7 @@ class RefStore {
 
   /// Drops a ref's log, as deleting the ref should.
   void deleteReflog(String refPath) {
-    final file = fs.file(Reflog.pathOf(gitDirectory, refPath));
+    final file = fs.file(Reflog.pathOf(_rootFor(refPath), refPath));
     if (file.existsSync()) file.deleteSync();
   }
 
@@ -389,7 +430,7 @@ class RefStore {
   /// `feature` directory stops a branch called `feature` from being created,
   /// because a file and a directory cannot share a name.
   void _pruneEmptyDirectories(GitFsDirectory directory) {
-    final root = p.join(gitDirectory, 'refs');
+    final root = p.join(commonDirectory, 'refs');
     var current = directory;
     while (p.isWithin(root, current.path)) {
       if (!current.existsSync() || current.listSync().isNotEmpty) return;
@@ -408,7 +449,7 @@ class RefStore {
     // later ref of the same name has not been anywhere.
     deleteReflog(refPath);
     final hadLoose = deleteLoose(refPath);
-    final packed = fs.file(p.join(gitDirectory, 'packed-refs'));
+    final packed = fs.file(p.join(commonDirectory, 'packed-refs'));
     if (!packed.existsSync()) return hadLoose;
 
     final kept = <String>[];
