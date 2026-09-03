@@ -1,12 +1,12 @@
 import 'dart:convert';
 // Inflating a packed object still uses dart:io's zlib: it is the only streaming
 // inflater in the SDK. A web backend will need another one.
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
 import '../fs/git_fs.dart';
+import '../platform/compress.dart';
 import '../object_id.dart';
 import '../objects/git_object.dart';
 import 'pack_index.dart';
@@ -288,34 +288,28 @@ class PackFile {
   /// the uncompressed size in the object's header is the only stopping
   /// condition available.
   Uint8List _inflateAt(int offset, int expectedSize) {
-    final filter = RawZLibFilter.inflateFilter();
-    final out = BytesBuilder(copy: false);
-    var at = offset;
-    const window = 8192;
-
-    while (out.length < expectedSize) {
-      if (at >= _fileLength) {
-        throw FormatException(
-          '$packPath ended while inflating the object at $offset',
-        );
-      }
-      final chunk = _readAt(at, _min(window, _fileLength - at));
-      at += chunk.length;
-      filter.process(chunk, 0, chunk.length);
-      List<int>? produced;
-      while ((produced = filter.processed(flush: false)) != null) {
-        out.add(produced!);
-      }
-    }
-
-    final bytes = out.takeBytes();
-    if (bytes.length != expectedSize) {
+    // Deflate never expands its input by more than the overhead of storing it
+    // uncompressed, so the compressed form of an object cannot be much larger
+    // than the object. That bound is what makes it safe to read a slab and
+    // inflate from it rather than feeding the decompressor window by window:
+    // the stream is certainly inside it, and whatever else the slab caught is
+    // ignored.
+    final bound = expectedSize + (expectedSize >> 10) + 64;
+    final available = _fileLength - offset;
+    if (available <= 0) {
       throw FormatException(
-        'object at $offset inflated to ${bytes.length} bytes, its header said '
-        '$expectedSize',
+        '$packPath ends before the object at $offset',
       );
     }
-    return bytes;
+
+    final slab = _readAt(offset, _min(bound, available));
+    try {
+      return inflateExactly(slab, expectedSize);
+    } on FormatException catch (error) {
+      throw FormatException(
+        'the object at $offset in $packPath: ${error.message}',
+      );
+    }
   }
 
   static int _min(int a, int b) => a < b ? a : b;

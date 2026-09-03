@@ -1,4 +1,3 @@
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
@@ -364,7 +363,7 @@ List<GitFsFile> _deleteAll(List<GitFsFile> files) {
   // One call over the shared root, rather than one per file.
   final roots = {for (final file in stubborn) p.dirname(file.path)};
   for (final root in roots) {
-    Process.runSync('attrib', ['-R', p.join(root, '*'), '/S']);
+    clearReadOnlyUnder(root);
   }
 
   for (final file in stubborn) {

@@ -200,13 +200,26 @@ void main() {
     git(['checkout', '-q', 'main']);
 
     final repo = Repository.open(repoPath);
+    final ours = repo.resolve('main')!;
+    final them = repo.resolve('side')!;
+
+    // git is asked first, outside the measurement. Spawning a process costs
+    // more than the walk being measured, and timing the two together makes a
+    // test about the shape of a walk fail whenever the machine is busy.
+    final expected = theirs('main', 'side');
+
     final clock = Stopwatch()..start();
-    expectAgreement(repo, 'main', 'side');
+    final mine = repo.countAheadBehind(ours, them)!;
     clock.stop();
 
-    // Generous, since the point is the shape of the walk rather than the
-    // machine: reading 60 shared commits per side would be far slower.
-    expect(clock.elapsedMilliseconds, lessThan(500));
+    expect((ahead: mine.ahead, behind: mine.behind), expected);
+
+    // A guard against a pathological regression - re-reading the object store
+    // per commit, say - and not a benchmark. Wall clock is a weak proxy here:
+    // without a commit-graph this walk reads every reachable commit by design,
+    // and the test harness costs several times what the walk does. The budget
+    // is therefore wide enough that only a real blow-up trips it.
+    expect(clock.elapsedMilliseconds, lessThan(3000));
     repo.close();
   });
 

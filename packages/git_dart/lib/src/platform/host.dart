@@ -27,6 +27,18 @@ bool get isWindows => impl.isWindows;
 /// processes sharing a repository.
 int get processId => impl.processId;
 
+/// Clears the read-only attribute from everything under [directory].
+///
+/// Windows refuses to delete a read-only file, and git marks the objects in a
+/// pack read-only — so repacking has to clear the attribute before it can
+/// remove the pack it replaced. There is no API for it: the only way is to
+/// shell out to `attrib`.
+///
+/// Nothing to do anywhere else. Every other platform decides deletion by the
+/// permissions on the *directory*, and a browser has no attribute and no
+/// subprocess to clear it with.
+void clearReadOnlyUnder(String directory) => impl.clearReadOnlyUnder(directory);
+
 /// The user's home directory, by whichever name this platform gives it, or
 /// null where there is none.
 String? get homeDirectory =>

@@ -6,7 +6,9 @@ version: 0.1.0
 publish_to: none
 
 environment:
-  sdk: ^3.0.0
+  # 3.5 for extension types, which the OPFS interop is written with. The app
+  # already required this much.
+  sdk: ^3.5.0
 
 dependencies:
   # A pure-Dart inflate that reports how much input it consumed. dart:io's

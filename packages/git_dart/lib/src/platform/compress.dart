@@ -26,3 +26,16 @@ Uint8List deflate(List<int> bytes) => impl.deflate(bytes);
 
 /// Expands a zlib stream produced by [deflate], or by git.
 Uint8List inflate(List<int> bytes) => impl.inflate(bytes);
+
+/// Inflates a zlib stream whose length is not recorded, stopping once
+/// [expectedSize] bytes have come out.
+///
+/// This is how a packed object is read. A pack stores where a compressed
+/// stream *begins* and never where it ends, so the only stopping condition is
+/// the uncompressed size in the object's own header — which means the reader
+/// has to be able to stop mid-buffer rather than being handed an exact slice.
+///
+/// [bytes] may therefore run past the end of the stream, and anything after it
+/// is ignored rather than being an error.
+Uint8List inflateExactly(List<int> bytes, int expectedSize) =>
+    impl.inflateExactly(bytes, expectedSize);
