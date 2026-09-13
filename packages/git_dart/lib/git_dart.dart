@@ -23,6 +23,7 @@ export 'src/fs/io_git_fs.dart';
 export 'src/fs/memory_archive.dart';
 export 'src/fs/memory_git_fs.dart';
 export 'src/fs/opfs_store.dart';
+export 'src/fs/directory_picker.dart';
 export 'src/platform/http.dart';
 export 'src/graph/commit_graph.dart';
 export 'src/graph/graph_walks.dart';

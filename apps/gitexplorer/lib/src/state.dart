@@ -3,6 +3,7 @@ import 'package:path/path.dart' as p;
 
 import 'generated/tokens.dart';
 import 'git_worker.dart';
+import 'workspace.dart';
 import 'models.dart';
 import 'repository_store.dart';
 
@@ -31,6 +32,13 @@ class CommitSelected extends Selection {
   final String repositoryPath;
   final String commitId;
   const CommitSelected(this.repositoryPath, this.commitId);
+}
+
+class SubmoduleSelected extends Selection {
+  final String repositoryPath;
+  final Revision revision;
+  final String path;
+  const SubmoduleSelected(this.repositoryPath, this.revision, this.path);
 }
 
 /// One line of the flattened tree.
@@ -85,6 +93,26 @@ class ExplorerState extends ChangeNotifier {
   // Detail-pane contents, each null until asked for.
   FileContent? _fileContent;
   FileDiff? _fileDiff;
+  BlameData? _blame;
+
+  /// What [_blame] answers for, so a second request for the same file and
+  /// revision does not repeat a walk that has already run.
+  (String, Revision, String)? _blameFor;
+  SubmoduleData? _submodule;
+
+  /// What [_submodule] answers for, so re-selecting the same one does not
+  /// repeat the lookup.
+  (String, Revision, String)? _submoduleFor;
+
+  /// Where the open commit was reached from, so leaving it can return there
+  /// instead of always landing on the repository's history
+  /// (`presentation.a-drill-down-remembers-where-it-was-opened-from`).
+  Selection? _commitReturnTo;
+
+  /// The file [backFromCommit] is returning to, so the file pane knows to
+  /// show its Blame tab again rather than defaulting back to the file - set
+  /// right before the return, consumed once the file has loaded.
+  (String, String)? _wantsBlameFor;
   List<CommitData>? _history;
   ({CommitData commit, List<ChangeData> changes})? _commit;
   FileDiff? _commitFileDiff;
@@ -101,6 +129,8 @@ class ExplorerState extends ChangeNotifier {
   String? get error => _error;
   FileContent? get fileContent => _fileContent;
   FileDiff? get fileDiff => _fileDiff;
+  BlameData? get blame => _blame;
+  SubmoduleData? get submodule => _submodule;
   List<CommitData>? get history => _history;
   ({CommitData commit, List<ChangeData> changes})? get commit => _commit;
   FileDiff? get commitFileDiff => _commitFileDiff;
@@ -118,8 +148,21 @@ class ExplorerState extends ChangeNotifier {
     await _git.start();
     final saved = await _store.load();
     _saved.addAll(saved.repositories);
+
+    // A repository already sitting in the workspace - in OPFS, on the web -
+    // is shown even when it is not in the saved list, so nothing already
+    // created needs a separate step to be found again. A no-op on the
+    // desktop, which has no workspace of its own to consult.
+    var reconciled = false;
+    for (final known in knownWorkspaceRepositories()) {
+      if (_saved.any((r) => r.path == known.path)) continue;
+      _saved.add(SavedRepository(path: known.path, name: known.name));
+      reconciled = true;
+    }
+
     _theme = saved.theme;
     notifyListeners();
+    if (reconciled) await _saveState();
     for (final repository in _saved) {
       await _refreshSummary(repository);
     }
@@ -317,6 +360,7 @@ class ExplorerState extends ChangeNotifier {
   List<RemoteData>? _remotes;
   FetchOutcome? _lastFetch;
   String? _fetching;
+  String? _fetchProgress;
 
   List<RemoteData>? get remotes => _remotes;
   FetchOutcome? get lastFetch => _lastFetch;
@@ -324,6 +368,10 @@ class ExplorerState extends ChangeNotifier {
   /// The remote currently being fetched, or null. A fetch waits on a network,
   /// so it is reported as pending rather than hidden.
   String? get fetching => _fetching;
+
+  /// What that fetch is doing right now, the same way [cloneProgress]
+  /// reports for a clone.
+  String? get fetchProgress => _fetchProgress;
 
   Future<void> loadRemotes(String repository) async {
     try {
@@ -364,6 +412,7 @@ class ExplorerState extends ChangeNotifier {
     bool remember = false,
   }) async {
     _fetching = name;
+    _fetchProgress = null;
     _lastFetch = null;
     notifyListeners();
     try {
@@ -373,6 +422,10 @@ class ExplorerState extends ChangeNotifier {
         username: username,
         password: password,
         remember: remember,
+        onProgress: (text) {
+          _fetchProgress = text;
+          notifyListeners();
+        },
       );
       _lastFetch = outcome;
       // Needing credentials is a question, not a failure.
@@ -385,15 +438,18 @@ class ExplorerState extends ChangeNotifier {
       return null;
     } finally {
       _fetching = null;
+      _fetchProgress = null;
       notifyListeners();
     }
   }
 
   PullOutcome? _lastPull;
   String? _pulling;
+  String? _pullProgress;
 
   PullOutcome? get lastPull => _lastPull;
   String? get pulling => _pulling;
+  String? get pullProgress => _pullProgress;
 
   /// Fetches and merges. Returns the outcome, or null when the worker failed.
   Future<PullOutcome?> pullRemote(
@@ -404,6 +460,7 @@ class ExplorerState extends ChangeNotifier {
     bool remember = false,
   }) async {
     _pulling = name;
+    _pullProgress = null;
     _lastPull = null;
     _lastFetch = null;
     notifyListeners();
@@ -414,6 +471,10 @@ class ExplorerState extends ChangeNotifier {
         username: username,
         password: password,
         remember: remember,
+        onProgress: (text) {
+          _pullProgress = text;
+          notifyListeners();
+        },
       );
       _lastPull = outcome;
       _error = outcome.fetch.needsCredentials ? null : outcome.error;
@@ -424,6 +485,7 @@ class ExplorerState extends ChangeNotifier {
       return null;
     } finally {
       _pulling = null;
+      _pullProgress = null;
       notifyListeners();
     }
   }
@@ -440,9 +502,11 @@ class ExplorerState extends ChangeNotifier {
 
   PushOutcome? _lastPush;
   String? _pushing;
+  String? _pushProgress;
 
   PushOutcome? get lastPush => _lastPush;
   String? get pushing => _pushing;
+  String? get pushProgress => _pushProgress;
 
   /// Pushes the current branch. [force] overwrites a remote branch holding
   /// commits this one does not — never assumed, only asked for.
@@ -455,6 +519,7 @@ class ExplorerState extends ChangeNotifier {
     bool remember = false,
   }) async {
     _pushing = name;
+    _pushProgress = null;
     _lastPush = null;
     notifyListeners();
     try {
@@ -465,6 +530,10 @@ class ExplorerState extends ChangeNotifier {
         username: username,
         password: password,
         remember: remember,
+        onProgress: (text) {
+          _pushProgress = text;
+          notifyListeners();
+        },
       );
       _lastPush = outcome;
       _error = outcome.needsCredentials ? null : outcome.error;
@@ -475,6 +544,7 @@ class ExplorerState extends ChangeNotifier {
       return null;
     } finally {
       _pushing = null;
+      _pushProgress = null;
       notifyListeners();
     }
   }
@@ -647,7 +717,15 @@ class ExplorerState extends ChangeNotifier {
   /// The URL being cloned, while one is running.
   String? _cloning;
 
+  /// What the clone is doing right now — a phase git_dart names locally
+  /// ("negotiating", "indexing"), or the server's own progress text relayed
+  /// over the sideband ("Receiving objects: 43% (215/500)"). Null between
+  /// updates carries no meaning of its own; only [cloning] says whether one
+  /// is running at all.
+  String? _cloneProgress;
+
   String? get cloning => _cloning;
+  String? get cloneProgress => _cloneProgress;
 
   /// Clones [url] into [path], and adds what arrives.
   ///
@@ -663,6 +741,7 @@ class ExplorerState extends ChangeNotifier {
     bool remember = false,
   }) async {
     _cloning = url;
+    _cloneProgress = null;
     notifyListeners();
     try {
       final outcome = await _git.cloneRepository(
@@ -671,8 +750,14 @@ class ExplorerState extends ChangeNotifier {
         username: username,
         password: password,
         remember: remember,
+        onProgress: (text) {
+          _cloneProgress = text;
+          notifyListeners();
+        },
       );
       _error = outcome.needsCredentials ? null : outcome.error;
+      // Registering it for OPFS happens inside GitService.cloneRepository,
+      // before the save that follows the clone - not here, which runs after.
       if (outcome.succeeded) await addRepository(outcome.path!);
       return outcome;
     } on GitWorkerException catch (failure) {
@@ -680,6 +765,7 @@ class ExplorerState extends ChangeNotifier {
       return null;
     } finally {
       _cloning = null;
+      _cloneProgress = null;
       notifyListeners();
     }
   }
@@ -727,6 +813,11 @@ class ExplorerState extends ChangeNotifier {
     _children.removeWhere((key, _) => key.$1 == path);
     if (_selectionRepository == path) _selection = const NothingSelected();
     await _saveState();
+    // A no-op where a repository is a folder: forgetting the row must not
+    // delete the user's folder. In a browser this is the folder, and leaving
+    // it in OPFS would mean a repository cloned again under the same name
+    // finds the old one still there and refuses to land on top of it.
+    await removeFromWorkspace(path);
     notifyListeners();
   }
 
@@ -762,6 +853,7 @@ class ExplorerState extends ChangeNotifier {
         RepositorySelected(:final repositoryPath) => repositoryPath,
         FileSelected(:final repositoryPath) => repositoryPath,
         CommitSelected(:final repositoryPath) => repositoryPath,
+        SubmoduleSelected(:final repositoryPath) => repositoryPath,
         NothingSelected() => null,
       };
 
@@ -913,6 +1005,10 @@ class ExplorerState extends ChangeNotifier {
     _selection = FileSelected(repositoryPath, revision, path);
     _fileContent = null;
     _fileDiff = null;
+    _blame = null;
+    _blameFor = null;
+    _submodule = null;
+    _submoduleFor = null;
     notifyListeners();
 
     try {
@@ -930,11 +1026,87 @@ class ExplorerState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> selectCommit(String repositoryPath, String commitId) async {
+  /// Loads who last touched each line, for the file currently open.
+  ///
+  /// Not fetched with the file itself: a walk back through history costs more
+  /// than reading one blob, and most files are opened to be read, not to be
+  /// attributed. Idempotent for the same file and revision, so a rebuild that
+  /// asks again does not repeat a walk already answered.
+  Future<void> loadBlame(
+    String repositoryPath,
+    Revision revision,
+    String path,
+  ) async {
+    final key = (repositoryPath, revision, path);
+    if (_blameFor == key) return;
+    _blameFor = key;
+    try {
+      _blame = await _git.blame(repositoryPath, revision, path);
+      _error = null;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+    }
+    notifyListeners();
+  }
+
+  /// Opens the detail pane on a submodule: what `.gitmodules` and the tree
+  /// say about it, joined with whether it has actually been cloned.
+  Future<void> selectSubmodule(String repositoryPath, String path) async {
+    final revision = revisionFor(repositoryPath);
+    _selection = SubmoduleSelected(repositoryPath, revision, path);
+    _fileContent = null;
+    _fileDiff = null;
+    _blame = null;
+    _blameFor = null;
+    _submodule = null;
+    _submoduleFor = null;
+    notifyListeners();
+    await loadSubmodule(repositoryPath, revision, path);
+  }
+
+  Future<void> loadSubmodule(
+    String repositoryPath,
+    Revision revision,
+    String path,
+  ) async {
+    final key = (repositoryPath, revision, path);
+    if (_submoduleFor == key) return;
+    _submoduleFor = key;
+    try {
+      _submodule = await _git.submodule(repositoryPath, revision, path);
+      _error = null;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+    }
+    notifyListeners();
+  }
+
+  /// Adds a submodule's own checkout as a repository of its own, the way any
+  /// other folder is added, and switches to it.
+  ///
+  /// Only reachable once [loadSubmodule] has reported somewhere to open -
+  /// nothing has cloned the submodule, there is nothing here but the gitlink
+  /// that says it should exist.
+  Future<void> openSubmoduleRepository(String path) async {
+    await addRepository(path);
+    _selection = RepositorySelected(path);
+    notifyListeners();
+  }
+
+  Future<void> selectCommit(
+    String repositoryPath,
+    String commitId, {
+    Selection? returnTo,
+  }) async {
+    _commitReturnTo = returnTo;
     _selection = CommitSelected(repositoryPath, commitId);
     _commit = null;
     _commitFileDiff = null;
     _commitFilePath = null;
+    _blame = null;
+    _blameFor = null;
+    _submodule = null;
+    _submoduleFor = null;
     notifyListeners();
 
     try {
@@ -944,6 +1116,31 @@ class ExplorerState extends ChangeNotifier {
       _error = failure.message;
     }
     notifyListeners();
+  }
+
+  /// Leaves the open commit for wherever it was reached from: the file being
+  /// blamed, when a blame line is what opened it, or the repository's
+  /// history otherwise.
+  Future<void> backFromCommit(String repositoryPath) async {
+    final target = _commitReturnTo;
+    _commitReturnTo = null;
+    if (target case FileSelected(:final path)) {
+      _wantsBlameFor = (repositoryPath, path);
+      await selectFile(repositoryPath, path);
+    } else if (target case SubmoduleSelected(:final path)) {
+      await selectSubmodule(repositoryPath, path);
+    } else {
+      await selectRepository(repositoryPath);
+    }
+  }
+
+  /// Consumed once the file pane has loaded [path], so it knows to show its
+  /// Blame tab again rather than defaulting back to the file - Blame is not
+  /// a file's normal opening view, so nothing shows it unless asked.
+  bool consumeWantsBlameView(String repositoryPath, String path) {
+    if (_wantsBlameFor != (repositoryPath, path)) return false;
+    _wantsBlameFor = null;
+    return true;
   }
 
   Future<void> selectCommitFile(String path) async {
@@ -978,7 +1175,12 @@ class ExplorerState extends ChangeNotifier {
       case RepositorySelected(:final repositoryPath):
         await selectRepository(repositoryPath);
       case CommitSelected(:final repositoryPath, :final commitId):
-        await selectCommit(repositoryPath, commitId);
+        // Preserved rather than dropped, so a refresh while a commit reached
+        // from blame is open does not turn its next "back" into one that
+        // lands on the repository's history instead.
+        await selectCommit(repositoryPath, commitId, returnTo: _commitReturnTo);
+      case SubmoduleSelected(:final repositoryPath, :final path):
+        await selectSubmodule(repositoryPath, path);
       case NothingSelected():
         break;
     }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../generated/tokens.dart';
 import '../models.dart';
 import '../state.dart';
+import '../workspace.dart';
 import '../storage_access.dart';
 import '../theme.dart';
 import 'clone_dialog.dart';
@@ -41,16 +42,37 @@ class TreePane extends StatelessWidget {
               const Spacer(),
               MenuAnchor(
                 menuChildren: [
-                  MenuItemButton(
-                    leadingIcon: const Icon(Icons.folder_open),
-                    onPressed: () => addRepository(context, state),
-                    child: const Text('Add a folder I have'),
-                  ),
+                  // Only where a repository can be a folder. In a browser
+                  // there is nothing to point at: the app's storage is its
+                  // own, so a repository gets there by being cloned.
+                  if (!repositoriesAreInternal)
+                    MenuItemButton(
+                      leadingIcon: const Icon(Icons.folder_open),
+                      onPressed: () => addRepository(context, state),
+                      child: const Text('Add a folder I have'),
+                    ),
                   MenuItemButton(
                     leadingIcon: const Icon(Icons.cloud_download_outlined),
                     onPressed: () => cloneRepository(context, state),
                     child: const Text('Clone from a URL'),
                   ),
+                  // The web-native counterpart to picking an empty folder and
+                  // initialising it: nowhere to point at, so a name is asked
+                  // instead.
+                  if (repositoriesAreInternal)
+                    MenuItemButton(
+                      leadingIcon: const Icon(Icons.add),
+                      onPressed: () => createRepository(context, state),
+                      child: const Text('Create a new repository'),
+                    ),
+                  // Only where the browser can actually show the picker -
+                  // Chromium, as of when this was written.
+                  if (canImportRepository)
+                    MenuItemButton(
+                      leadingIcon: const Icon(Icons.drive_folder_upload_outlined),
+                      onPressed: () => importRepository(context, state),
+                      child: const Text('Upload a repository'),
+                    ),
                 ],
                 builder: (context, controller, _) => IconButton.filledTonal(
                   icon: const Icon(Icons.add),
@@ -66,7 +88,7 @@ class TreePane extends StatelessWidget {
         // A clone is the one thing here that takes long enough to need saying
         // so, and it has no row of its own to say it in yet.
         if (state.cloning case final url?)
-          _Cloning(url: url)
+          _Cloning(url: url, progress: state.cloneProgress)
         else
           const Divider(height: 1),
         Expanded(
@@ -86,6 +108,11 @@ class TreePane extends StatelessWidget {
             content: Text(message),
             leading: const Icon(Icons.error_outline),
             actions: [
+              IconButton(
+                icon: const Icon(Icons.copy_outlined),
+                tooltip: 'Copy',
+                onPressed: () => copyToClipboard(message),
+              ),
               TextButton(
                 onPressed: state.dismissError,
                 child: const Text('Dismiss'),
@@ -278,24 +305,49 @@ class _EmptyRoot extends StatelessWidget {
             Text('No repositories yet', style: theme.textTheme.titleMedium),
             const SizedBox(height: 8),
             Text(
-              'Repositories are wherever they were cloned, so you choose which '
-              'ones to show here.',
+              repositoriesAreInternal
+                  ? 'Repositories are kept in this browser, so they start by '
+                      'being cloned.'
+                  : 'Repositories are wherever they were cloned, so you '
+                      'choose which ones to show here.',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
             const SizedBox(height: 20),
-            FilledButton.icon(
-              onPressed: () => addRepository(context, state),
-              icon: const Icon(Icons.add),
-              label: const Text('Add a repository'),
-            ),
-            const SizedBox(height: 8),
-            TextButton.icon(
-              onPressed: () => cloneRepository(context, state),
-              icon: const Icon(Icons.cloud_download_outlined),
-              label: const Text('Clone from a URL'),
-            ),
+            if (repositoriesAreInternal) ...[
+              FilledButton.icon(
+                onPressed: () => cloneRepository(context, state),
+                icon: const Icon(Icons.cloud_download_outlined),
+                label: const Text('Clone from a URL'),
+              ),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                onPressed: () => createRepository(context, state),
+                icon: const Icon(Icons.add),
+                label: const Text('Create a new repository'),
+              ),
+              if (canImportRepository) ...[
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: () => importRepository(context, state),
+                  icon: const Icon(Icons.drive_folder_upload_outlined),
+                  label: const Text('Upload a repository'),
+                ),
+              ],
+            ] else ...[
+              FilledButton.icon(
+                onPressed: () => addRepository(context, state),
+                icon: const Icon(Icons.add),
+                label: const Text('Add a repository'),
+              ),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                onPressed: () => cloneRepository(context, state),
+                icon: const Icon(Icons.cloud_download_outlined),
+                label: const Text('Clone from a URL'),
+              ),
+            ],
           ],
         ),
       ),
@@ -307,39 +359,57 @@ class _EmptyRoot extends StatelessWidget {
 class _Cloning extends StatelessWidget {
   final String url;
 
-  const _Cloning({required this.url});
+  /// The latest phase reported for it — a step git_dart names locally
+  /// ("negotiating", "indexing"), or the server's own text relayed over the
+  /// sideband ("Receiving objects: 43% (215/500)"). Null before the first one
+  /// arrives.
+  final String? progress;
+
+  const _Cloning({required this.url, this.progress});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final label = theme.textTheme.bodySmall?.copyWith(
+      color: theme.colorScheme.onSurfaceVariant,
+    );
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-          child: Row(
-            children: [
-              const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  'Cloning $url',
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            ],
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+          child: Text('Cloning $url', overflow: TextOverflow.ellipsis, style: label),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(2),
+            // Determinate whenever the server hands over a percentage, and
+            // indeterminate the rest of the time - a phase with no known
+            // total, such as indexing, genuinely has no fraction to show.
+            child: LinearProgressIndicator(minHeight: 3, value: _percentIn(progress)),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+          child: Text(
+            progress ?? 'contacting…',
+            overflow: TextOverflow.ellipsis,
+            style: label,
           ),
         ),
         const Divider(height: 1),
       ],
     );
   }
+}
+
+/// Pulls a fraction out of a progress line like `Receiving objects: 43%
+/// (215/500)`.
+double? _percentIn(String? text) {
+  if (text == null) return null;
+  final match = RegExp(r'(\d{1,3})%').firstMatch(text);
+  if (match == null) return null;
+  return int.parse(match.group(1)!).clamp(0, 100) / 100;
 }
 
 class _Row extends StatelessWidget {
@@ -467,9 +537,13 @@ class _EntryRow extends StatelessWidget {
     final entry = row.entry!;
     final expandable = entry.kind.expands;
     final expanded = state.isExpanded(row.repositoryPath, entry.path);
-    final selected = state.selection is FileSelected &&
-        (state.selection as FileSelected).path == entry.path &&
-        (state.selection as FileSelected).repositoryPath == row.repositoryPath;
+    final selected = switch (state.selection) {
+      FileSelected(:final repositoryPath, :final path) =>
+        repositoryPath == row.repositoryPath && path == entry.path,
+      SubmoduleSelected(:final repositoryPath, :final path) =>
+        repositoryPath == row.repositoryPath && path == entry.path,
+      _ => false,
+    };
     final unsaved = state.hasDraft(row.repositoryPath, entry.path);
     final color = statusColor(entry.state, context);
 
@@ -546,6 +620,9 @@ class _EntryRow extends StatelessWidget {
         onTap: () {
           if (expandable) {
             state.toggle(row.repositoryPath, entry.path);
+          } else if (entry.kind == EntryKind.submodule) {
+            state.selectSubmodule(row.repositoryPath, entry.path);
+            onNavigate?.call();
           } else {
             state.selectFile(row.repositoryPath, entry.path);
             onNavigate?.call();

@@ -159,8 +159,16 @@ class GitFsException implements Exception {
 
 GitFs _fs = defaults.defaultGitFs();
 
-/// The filesystem in use.
+/// The filesystem in use, for the package's own reads and writes.
 GitFs get fs => _fs;
+
+/// The filesystem git_dart is using.
+///
+/// Exposed so that an application reading the same working tree reads it
+/// through the same backend. On the web that is not a convenience: the
+/// application has no other way to reach the files, because there is no
+/// filesystem underneath for it to fall back on.
+GitFs get gitFs => _fs;
 
 /// Points git_dart at [value] for every path it reads or writes from now on.
 ///

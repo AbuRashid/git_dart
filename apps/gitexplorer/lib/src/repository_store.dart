@@ -1,9 +1,8 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
+import 'app_storage.dart';
 import 'generated/tokens.dart';
 
 /// One entry of the virtual root: a repository the user added.
@@ -69,20 +68,22 @@ class RepositoryStore {
   static const fileName = 'repositories.json';
 
   /// Injectable so a test does not write into the real support directory.
-  final Future<Directory> Function() _directory;
+  final Future<String?> Function(String key) _read;
+  final Future<void> Function(String key, String value) _write;
 
-  RepositoryStore({Future<Directory> Function()? directory})
-      : _directory = directory ?? getApplicationSupportDirectory;
-
-  Future<File> _file() async => File(p.join((await _directory()).path, fileName));
+  RepositoryStore({
+    Future<String?> Function(String key)? read,
+    Future<void> Function(String key, String value)? write,
+  })  : _read = read ?? readAppSetting,
+        _write = write ?? writeAppSetting;
 
   /// Everything remembered between sessions.
   Future<SavedState> load() async {
-    final file = await _file();
-    if (!file.existsSync()) return const SavedState();
+    final text = await _read(fileName);
+    if (text == null || text.isEmpty) return const SavedState();
 
     try {
-      final decoded = jsonDecode(file.readAsStringSync());
+      final decoded = jsonDecode(text);
       if (decoded is! Map) return const SavedState();
       final version = decoded['version'];
       if (version is int && version > persistedStateVersion) {
@@ -120,15 +121,12 @@ class RepositoryStore {
     return ThemeChoice.system;
   }
 
-  Future<void> save(SavedState state) async {
-    final file = await _file();
-    file.parent.createSync(recursive: true);
-    file.writeAsStringSync(
-      jsonEncode({
-        'version': persistedStateVersion,
-        'repositories': [for (final r in state.repositories) r.toJson()],
-        'theme': state.theme.name,
-      }),
-    );
-  }
+  Future<void> save(SavedState state) => _write(
+        fileName,
+        jsonEncode({
+          'version': persistedStateVersion,
+          'repositories': [for (final r in state.repositories) r.toJson()],
+          'theme': state.theme.name,
+        }),
+      );
 }

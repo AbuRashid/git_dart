@@ -64,7 +64,7 @@ Future<ExplorerState> pumpExplorer(
   late final ExplorerState state;
   await tester.runAsync(() async {
     state = ExplorerState(
-      store: RepositoryStore(directory: () async => support),
+      store: storeIn(support),
     );
     await state.start();
     if (withRepository) await state.addRepository(repoPath);
@@ -111,6 +111,42 @@ Future<void> tapAndWait(WidgetTester tester, Finder finder) async {
     );
   }
   await tester.pumpAndSettle();
+}
+
+/// Taps something whose handler talks to the worker and whose result, while
+/// it is awaited, is a spinner rather than the old screen.
+///
+/// [tapAndWait]'s `pumpAndSettle` never returns here: a `CircularProgress
+/// Indicator` schedules a frame for as long as it is on screen, which is
+/// exactly the shape `pumpAndSettle` treats as never having settled. This
+/// pumps a bounded number of times instead, the same way the plain
+/// `tester.pump` calls elsewhere in this file give a real worker reply time
+/// to land.
+Future<void> tapAndDrain(WidgetTester tester, Finder finder) async {
+  await tester.tap(finder);
+  await tester.pump();
+  for (var i = 0; i < 8; i++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 80)),
+    );
+    await tester.pump();
+  }
+}
+
+/// A store that keeps its file in [directory].
+///
+/// The store itself takes read and write functions rather than a directory,
+/// because it has to compile for the web, where there is no directory to be
+/// given. Putting the file back is the test's business.
+RepositoryStore storeIn(Directory directory) {
+  final file = File(p.join(directory.path, RepositoryStore.fileName));
+  return RepositoryStore(
+    read: (_) async => file.existsSync() ? file.readAsStringSync() : null,
+    write: (_, value) async {
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(value);
+    },
+  );
 }
 
 void main() {
@@ -265,6 +301,49 @@ void main() {
     expect(find.text('Select a file to see what changed'), findsOneWidget);
   });
 
+  testWidgets(
+      'going back from a commit reached by blame returns to blame, not history',
+      (tester) async {
+    final state = await pumpExplorer(tester);
+    final head = git(['rev-parse', 'HEAD']).trim();
+    final shortHead = head.substring(0, 8);
+
+    await act(tester, () => state.selectFile(repoPath, 'lib/main.dart'));
+    // Loaded ahead of the tap below, so switching to the tab is a plain
+    // `setState` with nothing to await - `loadBlame` is idempotent, so the
+    // tab's own call to it when tapped is a no-op over the same answer.
+    await act(
+      tester,
+      () => state.loadBlame(
+        repoPath,
+        state.revisionFor(repoPath),
+        'lib/main.dart',
+      ),
+    );
+    await tester.tap(find.text('Blame'));
+    await tester.pump();
+    expect(find.textContaining(shortHead), findsOneWidget);
+
+    // The one line there is blamed on the one commit there is; tapping its
+    // attribution opens that commit.
+    await tapAndDrain(
+      tester,
+      find
+          .ancestor(
+            of: find.textContaining(shortHead),
+            matching: find.byType(InkWell),
+          )
+          .first,
+    );
+    expect(find.text('Changed files (2)'), findsOneWidget);
+
+    // Back returns to the file's Blame tab, not the repository's history -
+    // blame is where this commit was reached from, not History.
+    await tapAndDrain(tester, find.byIcon(Icons.arrow_back));
+    expect(find.text('Changed files (2)'), findsNothing);
+    expect(find.textContaining(shortHead), findsOneWidget);
+  });
+
   testWidgets('a narrow window shows one pane at a time', (tester) async {
     final state = await pumpExplorer(tester, size: const Size(500, 900));
     expect(find.byType(TreePane), findsOneWidget);
@@ -322,7 +401,7 @@ void main() {
       (tester) async {
     final support = Directory(p.join(scratch.path, 'theme-support'))
       ..createSync(recursive: true);
-    final store = RepositoryStore(directory: () async => support);
+    final store = storeIn(support);
 
     late final ExplorerState state;
     await tester.runAsync(() async {
@@ -360,7 +439,7 @@ void main() {
     late final ExplorerState reopened;
     await tester.runAsync(() async {
       reopened = ExplorerState(
-        store: RepositoryStore(directory: () async => support),
+        store: storeIn(support),
       );
       await reopened.start();
     });
@@ -427,6 +506,28 @@ void main() {
       expect(renamed, isFalse);
       expect(state.error, isNotNull);
       expect(git(['branch', '--format=%(refname:short)']).trim(), before);
+    });
+
+    testWidgets('an error banner offers a copy icon, so it need not be retyped',
+        (tester) async {
+      final state = await pumpExplorer(tester);
+
+      var renamed = true;
+      await act(tester, () async {
+        renamed = await state.renameBranch(repoPath, 'main', 'has space');
+      });
+      expect(renamed, isFalse);
+      expect(state.error, isNotNull);
+
+      // Tapping it does not throw - the clipboard channel is stubbed under
+      // test, so there is nothing further to assert about where the text
+      // landed.
+      expect(find.byIcon(Icons.copy_outlined), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.copy_outlined));
+      await tester.pump();
+
+      await act(tester, () async => state.dismissError());
+      expect(find.byIcon(Icons.copy_outlined), findsNothing);
     });
 
     testWidgets('settings open, grouped, and write to the repository',

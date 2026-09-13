@@ -15,7 +15,8 @@ Never _noOpfs() => throw UnsupportedError(
 
 Future<bool> isAvailable() async => false;
 
-Future<MemoryGitFs> load(String root, String under) async => _noOpfs();
+Future<MemoryGitFs> load(String root, String under, MemoryGitFs? into) async =>
+    _noOpfs();
 
 Future<void> save(String root, String under, MemoryGitFs memory) async =>
     _noOpfs();

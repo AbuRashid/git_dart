@@ -4,6 +4,8 @@ import 'package:path/path.dart' as p;
 
 import '../models.dart';
 import '../state.dart';
+import '../theme.dart';
+import '../workspace.dart';
 import 'detail_pane.dart' show askForCredentials;
 import 'tree_pane.dart' show ensureStorageAccess;
 
@@ -88,6 +90,89 @@ void _report(BuildContext context, CloneOutcome outcome) {
   );
 }
 
+/// Asks for a name and makes an empty repository from it.
+///
+/// The web-native counterpart to picking an empty folder and initialising
+/// it: there is no folder to pick in a browser, so the name is the whole of
+/// what is asked. `state.initialiseRepository` creates the storage itself
+/// when it is not there yet, which is the only difference from the desktop
+/// path underneath.
+Future<void> createRepository(BuildContext context, ExplorerState state) async {
+  final name = await showDialog<String>(
+    context: context,
+    builder: (context) => const _CreateDialog(),
+  );
+  if (name == null) return;
+
+  await state.initialiseRepository(workspacePathFor(name));
+  if (!context.mounted) return;
+
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: copyableSnackBarMessage(
+        state.error ?? 'Created $name',
+        copyText: state.error,
+      ),
+    ),
+  );
+}
+
+class _CreateDialog extends StatefulWidget {
+  const _CreateDialog();
+
+  @override
+  State<_CreateDialog> createState() => _CreateDialogState();
+}
+
+class _CreateDialogState extends State<_CreateDialog> {
+  final _name = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _name.addListener(() => setState(() {}));
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = _name.text.trim();
+
+    void submit() {
+      if (name.isEmpty) return;
+      Navigator.pop(context, name);
+    }
+
+    return AlertDialog(
+      title: const Text('Create a new repository'),
+      content: SizedBox(
+        width: 400,
+        child: TextField(
+          controller: _name,
+          autofocus: true,
+          onSubmitted: (_) => submit(),
+          decoration: const InputDecoration(labelText: 'Name'),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: name.isEmpty ? null : submit,
+          child: const Text('Create'),
+        ),
+      ],
+    );
+  }
+}
+
 class _CloneDialog extends StatefulWidget {
   const _CloneDialog();
 
@@ -130,9 +215,18 @@ class _CloneDialogState extends State<_CloneDialog> {
     }
   }
 
-  String? get _destination => _parent == null || _name.text.trim().isEmpty
-      ? null
-      : p.join(_parent!, _name.text.trim());
+  /// Where the clone will land.
+  ///
+  /// In a browser there is no folder to choose - the app's storage is its
+  /// own - so the destination is derived from the name alone. Elsewhere it is
+  /// wherever the user picked, joined with the name.
+  String? get _destination {
+    final name = _name.text.trim();
+    if (name.isEmpty) return null;
+    if (repositoriesAreInternal) return workspacePathFor(name);
+    if (_parent == null) return null;
+    return p.join(_parent!, name);
+  }
 
   Future<void> _chooseParent() async {
     final picked = await FilePicker.getDirectoryPath(
@@ -169,22 +263,35 @@ class _CloneDialogState extends State<_CloneDialog> {
                   child: TextField(
                     controller: _name,
                     onChanged: (_) => setState(() => _nameWasEdited = true),
-                    decoration: const InputDecoration(labelText: 'Folder name'),
+                    decoration: InputDecoration(
+                      labelText:
+                          repositoriesAreInternal ? 'Name' : 'Folder name',
+                    ),
                   ),
                 ),
-                const SizedBox(width: 12),
-                OutlinedButton.icon(
-                  onPressed: _chooseParent,
-                  icon: const Icon(Icons.folder_open),
-                  label: Text(_parent == null ? 'Choose folder' : 'Change'),
-                ),
+                // Nothing to pick where there is nowhere to pick from: a
+                // browser keeps its own storage, and the name above is the
+                // whole of the destination.
+                if (!repositoriesAreInternal) ...[
+                  const SizedBox(width: 12),
+                  OutlinedButton.icon(
+                    onPressed: _chooseParent,
+                    icon: const Icon(Icons.folder_open),
+                    label: Text(_parent == null ? 'Choose folder' : 'Change'),
+                  ),
+                ],
               ],
             ),
             const SizedBox(height: 12),
-            // The whole path, because "where did it go" is the question a
-            // clone leaves behind.
+            // The whole path on the desktop, because "where did it go" is the
+            // question a clone leaves behind; a name is enough in a browser,
+            // since the path underneath means nothing to whoever is reading it.
             Text(
-              destination ?? 'Choose where to put it',
+              repositoriesAreInternal
+                  ? (destination == null
+                      ? 'Choose a name'
+                      : 'Kept in this browser')
+                  : (destination ?? 'Choose where to put it'),
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -209,4 +316,32 @@ class _CloneDialogState extends State<_CloneDialog> {
       ],
     );
   }
+}
+
+/// Brings in a folder the user already has, picked directly from their
+/// machine — the browser's counterpart to opening a folder on the desktop.
+///
+/// No dialog of its own: the picker itself is the whole of what has to be
+/// asked, since the folder's own name is the repository's name. Only ever
+/// called where [canImportRepository] said yes, so a browser that cannot
+/// offer the picker never reaches this at all.
+Future<void> importRepository(BuildContext context, ExplorerState state) async {
+  final outcome = await importPickedRepository();
+  if (outcome == null) return; // the picker was closed without choosing
+  if (!context.mounted) return;
+
+  if (!outcome.succeeded) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: copyableSnackBarMessage(outcome.error!, copyText: outcome.error),
+      ),
+    );
+    return;
+  }
+
+  await state.addRepository(outcome.path!);
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(content: Text('Imported ${outcome.name}')),
+  );
 }

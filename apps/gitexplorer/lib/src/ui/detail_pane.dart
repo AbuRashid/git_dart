@@ -37,6 +37,12 @@ class DetailPane extends StatelessWidget {
           repositoryPath: repositoryPath,
           onBack: onBack,
         ),
+      SubmoduleSelected(:final repositoryPath, :final path) => _SubmoduleDetail(
+          state: state,
+          repositoryPath: repositoryPath,
+          path: path,
+          onBack: onBack,
+        ),
     };
   }
 }
@@ -338,7 +344,9 @@ class _Facts extends StatelessWidget {
           ),
           Chip(label: Text('${summary.changedCount} changed')),
           Chip(label: Text('${summary.untrackedCount} untracked')),
-          Chip(label: Text(_count(summary.branches.length, 'branch', 'branches'))),
+          Chip(
+              label:
+                  Text(_count(summary.branches.length, 'branch', 'branches'))),
           Chip(label: Text(_count(summary.tags.length, 'tag', 'tags'))),
         ],
       ),
@@ -411,9 +419,8 @@ class _Branches extends StatelessWidget {
                 branch == summary.branch
                     ? Icons.radio_button_checked
                     : Icons.call_split,
-                color: branch == summary.branch
-                    ? theme.colorScheme.primary
-                    : null,
+                color:
+                    branch == summary.branch ? theme.colorScheme.primary : null,
               ),
               title: Text(branch),
               subtitle:
@@ -496,8 +503,9 @@ Future<void> _renameBranch(
 
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
-      content: Text(
+      content: copyableSnackBarMessage(
         ok ? 'Renamed $branch to $to' : state.error ?? 'Rename refused',
+        copyText: ok ? null : state.error ?? 'Rename refused',
       ),
     ),
   );
@@ -536,8 +544,9 @@ Future<void> _deleteBranch(
   if (!context.mounted) return;
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
-      content: Text(
+      content: copyableSnackBarMessage(
         ok ? 'Deleted $branch' : state.error ?? 'Delete refused',
+        copyText: ok ? null : state.error ?? 'Delete refused',
       ),
     ),
   );
@@ -599,12 +608,15 @@ class _Remotes extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (state.fetching == remote.name)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 12),
-                      child: SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                    Tooltip(
+                      message: state.fetchProgress ?? 'fetching',
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 12),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
                       ),
                     )
                   else
@@ -620,12 +632,15 @@ class _Remotes extends StatelessWidget {
                       icon: const Icon(Icons.download_outlined),
                     ),
                   if (state.pulling == remote.name)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 12),
-                      child: SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                    Tooltip(
+                      message: state.pullProgress ?? 'pulling',
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 12),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
                       ),
                     )
                   else
@@ -641,12 +656,15 @@ class _Remotes extends StatelessWidget {
                       icon: const Icon(Icons.sync),
                     ),
                   if (state.pushing == remote.name)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 12),
-                      child: SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                    Tooltip(
+                      message: state.pushProgress ?? 'pushing',
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 12),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
                       ),
                     )
                   else
@@ -695,7 +713,9 @@ class _Remotes extends StatelessWidget {
                                 '${outcome.conflicts.length} '
                                     '${outcome.conflicts.length == 1 ? 'file needs' : 'files need'} '
                                     'resolving',
-                              _ when outcome.mergeOutcome == 'alreadyUpToDate' =>
+                              _
+                                  when outcome.mergeOutcome ==
+                                      'alreadyUpToDate' =>
                                 'Nothing new to merge',
                               _ when outcome.mergeOutcome == 'fastForward' =>
                                 'Moved forward to ${outcome.remote}',
@@ -744,14 +764,14 @@ class _Remotes extends StatelessWidget {
                             outcome.needsCredentials
                                 ? '${outcome.remote} needs a sign-in'
                                 : outcome.error != null
-                                ? 'Push to ${outcome.remote} failed'
-                                : outcome.rejected.isNotEmpty
-                                    ? 'Push to ${outcome.remote} refused'
-                                    : outcome.updated.isEmpty
-                                        ? '${outcome.remote} already has these '
-                                            'commits'
-                                        : 'Pushed ${outcome.objectsSent} '
-                                            'objects to ${outcome.remote}',
+                                    ? 'Push to ${outcome.remote} failed'
+                                    : outcome.rejected.isNotEmpty
+                                        ? 'Push to ${outcome.remote} refused'
+                                        : outcome.updated.isEmpty
+                                            ? '${outcome.remote} already has these '
+                                                'commits'
+                                            : 'Pushed ${outcome.objectsSent} '
+                                                'objects to ${outcome.remote}',
                             style: theme.textTheme.bodyMedium,
                           ),
                           for (final line in outcome.updated)
@@ -812,14 +832,14 @@ class _Remotes extends StatelessWidget {
                             outcome.needsCredentials
                                 ? '${outcome.remote} needs a sign-in'
                                 : outcome.error != null
-                                ? 'Fetch from ${outcome.remote} failed'
-                                : outcome.updated.isEmpty
-                                    // Not "up to date": a fetch that brought
-                                    // nothing says nothing about whether this
-                                    // branch and the remote's agree.
-                                    ? 'No new commits on ${outcome.remote}'
-                                    : 'Fetched ${outcome.objectsReceived} '
-                                        'objects from ${outcome.remote}',
+                                    ? 'Fetch from ${outcome.remote} failed'
+                                    : outcome.updated.isEmpty
+                                        // Not "up to date": a fetch that brought
+                                        // nothing says nothing about whether this
+                                        // branch and the remote's agree.
+                                        ? 'No new commits on ${outcome.remote}'
+                                        : 'Fetched ${outcome.objectsReceived} '
+                                            'objects from ${outcome.remote}',
                             style: theme.textTheme.bodyMedium,
                           ),
                           // What moved, by name (`care.reported`).
@@ -868,53 +888,59 @@ Future<SignIn?> askForCredentials(
     builder: (context) => StatefulBuilder(
       builder: (context, setState) => AlertDialog(
         title: Text(wereRejected ? 'Sign in again' : 'Sign in to $remote'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (wereRejected)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 12),
-                child: Text('The saved details were refused.'),
+        // Scrollable rather than a plain Column: two fields, a two-line
+        // checkbox subtitle and the keyboard all competing for a phone's
+        // height overflows otherwise - the keyboard is what a password field
+        // guarantees will be on screen.
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (wereRejected)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 12),
+                  child: Text('The saved details were refused.'),
+                ),
+              TextField(
+                controller: name,
+                autofocus: (username ?? '').isEmpty,
+                decoration: const InputDecoration(labelText: 'Username'),
               ),
-            TextField(
-              controller: name,
-              autofocus: (username ?? '').isEmpty,
-              decoration: const InputDecoration(labelText: 'Username'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: secret,
-              autofocus: (username ?? '').isNotEmpty,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'Password or access token',
+              const SizedBox(height: 12),
+              TextField(
+                controller: secret,
+                autofocus: (username ?? '').isNotEmpty,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Password or access token',
+                ),
+                onSubmitted: (_) => Navigator.pop(context, (
+                  username: name.text.trim(),
+                  password: secret.text,
+                  remember: remember,
+                )),
               ),
-              onSubmitted: (_) => Navigator.pop(context, (
-                username: name.text.trim(),
-                password: secret.text,
-                remember: remember,
-              )),
-            ),
-            const SizedBox(height: 8),
-            CheckboxListTile(
-              contentPadding: EdgeInsets.zero,
-              value: remember,
-              onChanged: canSave
-                  ? (value) => setState(() => remember = value ?? false)
-                  : null,
-              title: const Text('Save it'),
-              subtitle: Text(
-                canSave
-                    // Named plainly: the user should know where their secret
-                    // is going, and that it is not this application's own file.
-                    ? 'Kept by git\'s credential helper, the same store git '
-                        'itself uses'
-                    : 'No credential helper is configured, so this can only '
-                        'be remembered until the window closes',
+              const SizedBox(height: 8),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: remember,
+                onChanged: canSave
+                    ? (value) => setState(() => remember = value ?? false)
+                    : null,
+                title: const Text('Save it'),
+                subtitle: Text(
+                  canSave
+                      // Named plainly: the user should know where their secret
+                      // is going, and that it is not this application's own file.
+                      ? 'Kept by git\'s credential helper, the same store git '
+                          'itself uses'
+                      : 'No credential helper is configured, so this can only '
+                          'be remembered until the window closes',
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -1417,8 +1443,8 @@ class _CommitBoxState extends State<_CommitBox> {
                           children: [
                             Text(
                               'Committed ${committed.shortId}',
-                              style: theme.textTheme.bodySmall
-                                  ?.copyWith(color: onSuccessBackground(context)),
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                  color: onSuccessBackground(context)),
                             ),
                             Text(
                               committed.summary,
@@ -1581,6 +1607,142 @@ String _two(int value) => value.toString().padLeft(2, '0');
 // a file
 // ---------------------------------------------------------------------------
 
+/// A gitlink: what `.gitmodules` and the tree say about it, joined with
+/// whether it has actually been cloned.
+class _SubmoduleDetail extends StatelessWidget {
+  final ExplorerState state;
+  final String repositoryPath;
+  final String path;
+  final VoidCallback? onBack;
+
+  const _SubmoduleDetail({
+    required this.state,
+    required this.repositoryPath,
+    required this.path,
+    this.onBack,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final submodule = state.submodule;
+
+    if (submodule == null) {
+      return Column(
+        children: [
+          _Header(title: path.split('/').last, subtitle: path, onBack: onBack),
+          const Expanded(child: Center(child: CircularProgressIndicator())),
+        ],
+      );
+    }
+
+    return Column(
+      children: [
+        _Header(
+            title: submodule.name, subtitle: submodule.path, onBack: onBack),
+        Expanded(
+          child: submodule.unavailable != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(
+                      submodule.unavailable!,
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                  ),
+                )
+              : ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    Chip(
+                      avatar: Icon(
+                        switch (submodule.status) {
+                          SubmoduleStatus.current => Icons.check_circle_outline,
+                          SubmoduleStatus.moved => Icons.sync_problem_outlined,
+                          SubmoduleStatus.notInitialised =>
+                            Icons.download_outlined,
+                          SubmoduleStatus.undescribed => Icons.help_outline,
+                        },
+                        size: 18,
+                      ),
+                      label: Text(switch (submodule.status) {
+                        SubmoduleStatus.current => 'up to date',
+                        SubmoduleStatus.moved => 'checked out elsewhere',
+                        SubmoduleStatus.notInitialised => 'not cloned',
+                        SubmoduleStatus.undescribed => 'not in .gitmodules',
+                      }),
+                    ),
+                    const SizedBox(height: 20),
+                    if (submodule.url != null)
+                      _SubmoduleFact(label: 'URL', value: submodule.url!),
+                    if (submodule.branch != null)
+                      _SubmoduleFact(label: 'Branch', value: submodule.branch!),
+                    if (submodule.recordedCommit != null)
+                      _SubmoduleFact(
+                        label: 'Recorded commit',
+                        value: submodule.recordedCommit!.substring(0, 8),
+                      ),
+                    if (submodule.checkedOutCommit != null)
+                      _SubmoduleFact(
+                        label: 'Checked-out commit',
+                        value: submodule.checkedOutCommit!.substring(0, 8),
+                      ),
+                    const SizedBox(height: 24),
+                    if (submodule.openableAt != null)
+                      FilledButton.icon(
+                        onPressed: () => state
+                            .openSubmoduleRepository(submodule.openableAt!),
+                        icon: const Icon(Icons.dataset_linked_outlined),
+                        label: const Text('Open as a repository'),
+                      )
+                    else if (submodule.status == SubmoduleStatus.notInitialised)
+                      Text(
+                        'Nothing is cloned here yet, so there is nothing to '
+                        'browse. ${submodule.url == null ? '' : 'Clone '
+                            '${submodule.url} into ${submodule.path} to '
+                            'explore it.'}',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SubmoduleFact extends StatelessWidget {
+  final String label;
+  final String value;
+  const _SubmoduleFact({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: theme.textTheme.labelMedium
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          SelectableText(
+            value,
+            style:
+                theme.textTheme.bodyMedium?.copyWith(fontFamily: 'monospace'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _FileDetail extends StatefulWidget {
   final ExplorerState state;
   final String repositoryPath;
@@ -1599,7 +1761,7 @@ class _FileDetail extends StatefulWidget {
 }
 
 /// The ways one file can be shown.
-enum _FileView { document, file, diff }
+enum _FileView { document, file, diff, blame }
 
 class _FileDetailState extends State<_FileDetail> {
   /// A changed file opens on the file, not on its diff: the file is the thing
@@ -1692,20 +1854,31 @@ class _FileDetailState extends State<_FileDetail> {
     final key = '${widget.repositoryPath} ${widget.path}';
     if (content != null && _viewFor != key) {
       _viewFor = key;
+      // Coming back from a commit reached by tapping a blame line lands on
+      // Blame again rather than on the file it always otherwise opens on -
+      // that is where the click that led here was made from.
+      final wantsBlame =
+          state.consumeWantsBlameView(widget.repositoryPath, widget.path) &&
+              !content.isBinary;
       _view = _isDocument && (_reading?.isDocument ?? false)
           ? _FileView.document
-          : _FileView.file;
+          : wantsBlame
+              ? _FileView.blame
+              : _FileView.file;
+      if (_view == _FileView.blame) {
+        state.loadBlame(widget.repositoryPath, revision, widget.path);
+      }
     }
 
     final views = [
       if (_isDocument) _FileView.document,
       _FileView.file,
       if (diff != null) _FileView.diff,
+      if (content != null && !content.isBinary) _FileView.blame,
     ];
     // A diff of something being edited compares the wrong pair, so it is
     // withheld rather than shown wrong — the rule this pane already followed.
-    final showing =
-        _view == _FileView.diff && dirty ? _FileView.file : _view;
+    final showing = _view == _FileView.diff && dirty ? _FileView.file : _view;
 
     return Column(
       children: [
@@ -1741,13 +1914,20 @@ class _FileDetailState extends State<_FileDetail> {
                         _FileView.document => 'Document',
                         _FileView.file => 'File',
                         _FileView.diff => 'Diff',
+                        _FileView.blame => 'Blame',
                       }),
                     ),
                 ],
                 selected: {showing},
                 showSelectedIcon: false,
-                onSelectionChanged: (selection) =>
-                    setState(() => _view = selection.first),
+                onSelectionChanged: (selection) {
+                  final next = selection.first;
+                  setState(() => _view = next);
+                  if (next == _FileView.blame) {
+                    state.loadBlame(
+                        widget.repositoryPath, revision, widget.path);
+                  }
+                },
               ),
             const SizedBox(width: 8),
           ],
@@ -1763,6 +1943,18 @@ class _FileDetailState extends State<_FileDetail> {
           )
         else if (showing == _FileView.diff && diff != null)
           Expanded(child: _DiffView(diff: diff))
+        else if (showing == _FileView.blame)
+          Expanded(
+            child: state.blame == null
+                ? const Center(child: CircularProgressIndicator())
+                : _BlameView(
+                    blame: state.blame!,
+                    state: state,
+                    repositoryPath: widget.repositoryPath,
+                    revision: revision,
+                    path: widget.path,
+                  ),
+          )
         else if (editable)
           Expanded(
             child: _Editor(
@@ -1987,6 +2179,113 @@ class _TextViewState extends State<_TextView> {
   }
 }
 
+/// Who last touched each line, and when.
+///
+/// A commit is named once per run of lines it introduced, not on every line —
+/// the same convention `git blame`'s own porcelain output and every code host
+/// use, since a hundred lines from one commit repeating its own name a hundred
+/// times would say nothing a single line does not already say.
+class _BlameView extends StatelessWidget {
+  final BlameData blame;
+  final ExplorerState state;
+  final String repositoryPath;
+  final Revision revision;
+  final String path;
+
+  const _BlameView({
+    required this.blame,
+    required this.state,
+    required this.repositoryPath,
+    required this.revision,
+    required this.path,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    if (blame.unavailable != null) {
+      return Center(
+        child: Text(
+          blame.unavailable!,
+          style: theme.textTheme.bodyMedium
+              ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
+      );
+    }
+
+    final mono = monospaceStyle(context);
+    final palette = SyntaxPalette.of(context);
+    final highlighter = CodeHighlighter(
+      blame.path,
+      [for (final line in blame.lines) line.text],
+    );
+
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: blame.lines.length,
+      itemBuilder: (context, index) {
+        final line = blame.lines[index];
+        // Named only where the commit above it differs, or at the very top.
+        final sameAsAbove =
+            index > 0 && blame.lines[index - 1].commitId == line.commitId;
+
+        return InkWell(
+          onTap: () => state.selectCommit(
+            repositoryPath,
+            line.commitId,
+            returnTo: FileSelected(repositoryPath, revision, path),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 220,
+                  child: sameAsAbove
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: Text(
+                            '${line.commitId.substring(0, 8)} '
+                            '${line.authorName} · ${_when(line.authorWhen)}',
+                            overflow: TextOverflow.ellipsis,
+                            style: mono.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                ),
+                SizedBox(
+                  width: 44,
+                  child: Text(
+                    '${line.number}',
+                    textAlign: TextAlign.right,
+                    style: mono.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text.rich(
+                    codeSpan(
+                      line.text,
+                      highlighter.tokensFor(index, line.text),
+                      mono,
+                      palette,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _DiffView extends StatelessWidget {
   final FileDiff diff;
   const _DiffView({required this.diff});
@@ -2131,7 +2430,7 @@ class _CommitDetail extends StatelessWidget {
           title: commit.summary,
           subtitle: '${commit.shortId} · ${commit.authorName} · '
               '${_when(commit.when)}',
-          onBack: onBack ?? () => state.selectRepository(repositoryPath),
+          onBack: onBack ?? () => state.backFromCommit(repositoryPath),
         ),
         if (commit.message.trim() != commit.summary.trim())
           Padding(

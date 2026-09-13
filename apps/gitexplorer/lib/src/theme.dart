@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:syntax_dart/syntax_dart.dart';
 
 import 'generated/tokens.dart';
@@ -90,6 +91,40 @@ Color? statusColor(FileState state, BuildContext context) {
     FileState.untracked => theme.colorScheme.onSurfaceVariant,
     FileState.clean || FileState.ignored => null,
   };
+}
+
+/// Puts [text] on the clipboard.
+///
+/// What every "Copy" action in the application is for: an error is exactly
+/// the text someone reporting it needs, and retyping it off the screen is
+/// where a character goes missing and the report stops matching what
+/// actually happened.
+void copyToClipboard(String text) => Clipboard.setData(ClipboardData(text: text));
+
+/// A message with a "Copy" icon beside it, for a [SnackBar] — which, unlike
+/// [MaterialBanner], has no general actions row to put a plain icon button
+/// in, only a single text [SnackBarAction] with no room for an icon of its
+/// own.
+///
+/// [copyText] is null for a message worth showing but not worth copying — a
+/// plain "done" has nothing a bug report would want — in which case this is
+/// just the message, with nothing beside it.
+Widget copyableSnackBarMessage(String message, {String? copyText}) {
+  if (copyText == null) return Text(message);
+  return Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Flexible(child: Text(message)),
+      const SizedBox(width: 8),
+      IconButton(
+        icon: const Icon(Icons.copy_outlined, size: 18),
+        tooltip: 'Copy',
+        visualDensity: VisualDensity.compact,
+        padding: EdgeInsets.zero,
+        onPressed: () => copyToClipboard(copyText),
+      ),
+    ],
+  );
 }
 
 /// The fill behind a "that worked" message.

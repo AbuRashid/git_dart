@@ -12,8 +12,6 @@
 library;
 
 import 'dart:async';
-import 'dart:io';
-import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:git_dart/git_dart.dart' as git;
@@ -22,6 +20,8 @@ import 'package:path/path.dart' as p;
 import 'credential_store.dart';
 import 'generated/tokens.dart';
 import 'models.dart';
+import 'worker_transport.dart';
+import 'workspace.dart';
 
 // ---------------------------------------------------------------------------
 // protocol
@@ -59,6 +59,20 @@ class LoadFileDiff extends GitRequest {
   final Revision revision;
   final String path;
   const LoadFileDiff(this.repositoryPath, this.revision, this.path);
+}
+
+class LoadBlame extends GitRequest {
+  final String repositoryPath;
+  final Revision revision;
+  final String path;
+  const LoadBlame(this.repositoryPath, this.revision, this.path);
+}
+
+class LoadSubmodule extends GitRequest {
+  final String repositoryPath;
+  final Revision revision;
+  final String path;
+  const LoadSubmodule(this.repositoryPath, this.revision, this.path);
 }
 
 class LoadHistory extends GitRequest {
@@ -314,50 +328,51 @@ class Refresh extends GitRequest {
   const Refresh(this.repositoryPath);
 }
 
-class _Envelope {
+/// A request with the number its reply will carry.
+///
+/// Public because it crosses the transport boundary, and the transport is
+/// chosen per platform: an isolate where there is one, and a direct call in a
+/// browser, which has no isolates to spawn.
+class WorkerEnvelope {
   final int id;
   final GitRequest request;
-  const _Envelope(this.id, this.request);
+  const WorkerEnvelope(this.id, this.request);
 }
 
-class _Reply {
+class WorkerReply {
   final int id;
   final Object? value;
   final String? error;
-  const _Reply(this.id, this.value, this.error);
+  const WorkerReply(this.id, this.value, this.error);
+}
+
+/// Commentary on a request that is still being worked out - a clone or a
+/// fetch, waiting on a network. Zero or more of these precede the
+/// [WorkerReply] for the same [id].
+class WorkerProgress {
+  final int id;
+  final String message;
+  const WorkerProgress(this.id, this.message);
 }
 
 // ---------------------------------------------------------------------------
 // the worker
 // ---------------------------------------------------------------------------
 
-void gitWorkerMain(SendPort toMain) {
-  final inbox = ReceivePort();
-  toMain.send(inbox.sendPort);
-
-  final worker = _Worker();
-
-  inbox.listen((message) async {
-    if (message is! _Envelope) return;
-    try {
-      // Most handlers are synchronous; a fetch is not, and waits on a network
-      // that may never answer.
-      final result = worker.handle(message.request);
-      final value = result is Future ? await result : result;
-      toMain.send(_Reply(message.id, value, null));
-    } catch (error) {
-      // A failure is a reply, not a crash: one bad repository must not take
-      // the worker down and with it every other repository's state.
-      toMain.send(_Reply(message.id, null, error.toString()));
-    }
-  });
-}
-
-class _Worker {
+/// Everything git_dart is asked to do, in one place.
+///
+/// Holds the open repositories, so a second question about the same repository
+/// does not pay to reopen it — which on a large one means reading every pack
+/// index again (`concurrency.why-a-worker-and-not-a-call-per-operation`).
+///
+/// Public so that a platform without isolates can run it in place. Nothing
+/// here knows how it was reached.
+class GitWorker {
   final _repositories = <String, git.Repository>{};
   final _statuses = <String, Map<String, FileState>>{};
 
-  Object? handle(GitRequest request) => switch (request) {
+  Object? handle(GitRequest request, {void Function(String)? onProgress}) =>
+      switch (request) {
         OpenRepository() => _open(request),
         InitialiseRepository() => _initialise(request),
         WriteFile() => _write(request),
@@ -369,10 +384,10 @@ class _Worker {
         LoadRemotes() => _remotes(request),
         AddRemote() => _addRemote(request),
         RemoveRemote() => _removeRemote(request),
-        CloneRepository() => _clone(request),
-        FetchRemote() => _fetch(request),
-        PushRemote() => _push(request),
-        PullRemote() => _pull(request),
+        CloneRepository() => _clone(request, onProgress: onProgress),
+        FetchRemote() => _fetch(request, onProgress: onProgress),
+        PushRemote() => _push(request, onProgress: onProgress),
+        PullRemote() => _pull(request, onProgress: onProgress),
         IgnorePath() => _ignore(request),
         CountTracked() => _countTracked(request),
         LoadStaging() => _staging(request),
@@ -381,6 +396,8 @@ class _Worker {
         LoadDirectory() => _directory(request),
         LoadFile() => _file(request),
         LoadFileDiff() => _fileDiff(request),
+        LoadBlame() => _blame(request),
+        LoadSubmodule() => _submodule(request),
         LoadHistory() => _history(request),
         LoadCommit() => _commit(request),
         LoadCommitDiff() => _commitDiff(request),
@@ -408,7 +425,7 @@ class _Worker {
   RepositorySummary _open(OpenRepository request) {
     final blank = RepositorySummary(path: request.path, name: request.name);
 
-    if (!Directory(request.path).existsSync()) {
+    if (!git.gitFs.directory(request.path).existsSync()) {
       return blank.unavailable(UnavailableReason.missing);
     }
 
@@ -447,10 +464,26 @@ class _Worker {
   }
 
   RepositorySummary _initialise(InitialiseRepository request) {
-    final directory = Directory(request.path);
-    if (!directory.existsSync()) {
-      throw StateError('${request.path} is not there to initialise');
+    if (git.gitFs.file(request.path).existsSync()) {
+      throw StateError('${request.path} is a file, not a folder');
     }
+    final directory = git.gitFs.directory(request.path);
+    if (!directory.existsSync()) {
+      // A folder the desktop picker returned always exists, so this path
+      // means one of two different things depending on where it is asked
+      // from. In a browser there was never anything to pick - a name typed
+      // for a brand new repository is the whole request, and creating the
+      // storage is the point. On the desktop the same absence means a folder
+      // that has gone missing since it was added - an unmounted drive, most
+      // likely - and silently making a new empty one in its place would
+      // replace a question the user needs to see ("where did my repository
+      // go?") with an answer that is simply wrong.
+      if (!repositoriesAreInternal) {
+        throw StateError('${request.path} is not there to initialise');
+      }
+      directory.createSync(recursive: true);
+    }
+
     // Refuse rather than write over something already here. Initialising on
     // top of a repository that exists but failed to open would be destroying
     // it on the strength of not having understood it
@@ -647,7 +680,10 @@ class _Worker {
   ///
   /// A clone is the one network operation with no repository to ask about
   /// first, so the credentials are looked up against the URL itself.
-  Future<CloneOutcome> _clone(CloneRepository request) async {
+  Future<CloneOutcome> _clone(
+    CloneRepository request, {
+    void Function(String)? onProgress,
+  }) async {
     final credentials = await _credentialsFor(
       request.url,
       request.username,
@@ -659,6 +695,7 @@ class _Worker {
         request.url,
         request.path,
         credentials: credentials,
+        onProgress: onProgress,
       );
       if (credentials != null && request.remember) {
         await _credentials.save(request.url, credentials);
@@ -687,7 +724,10 @@ class _Worker {
     }
   }
 
-  Future<FetchOutcome> _fetch(FetchRemote request) async {
+  Future<FetchOutcome> _fetch(
+    FetchRemote request, {
+    void Function(String)? onProgress,
+  }) async {
     final repo = _repository(request.repositoryPath);
     final remote = repo.remotes.named(request.name);
     if (remote == null) {
@@ -704,7 +744,12 @@ class _Worker {
     );
 
     try {
-      final result = await git.fetch(repo, remote, credentials: credentials);
+      final result = await git.fetch(
+        repo,
+        remote,
+        credentials: credentials,
+        onProgress: onProgress,
+      );
       _statuses.remove(request.repositoryPath);
       if (credentials != null && request.remember) {
         await _credentials.save(remote.url, credentials);
@@ -736,14 +781,20 @@ class _Worker {
   }
 
   /// Fetch, then merge what arrived — which is what a pull has always been.
-  Future<PullOutcome> _pull(PullRemote request) async {
-    final fetched = await _fetch(FetchRemote(
-      request.repositoryPath,
-      request.name,
-      username: request.username,
-      password: request.password,
-      remember: request.remember,
-    ));
+  Future<PullOutcome> _pull(
+    PullRemote request, {
+    void Function(String)? onProgress,
+  }) async {
+    final fetched = await _fetch(
+      FetchRemote(
+        request.repositoryPath,
+        request.name,
+        username: request.username,
+        password: request.password,
+        remember: request.remember,
+      ),
+      onProgress: onProgress,
+    );
 
     if (fetched.error != null || fetched.needsCredentials) {
       return PullOutcome(remote: request.name, fetch: fetched);
@@ -788,7 +839,10 @@ class _Worker {
     }
   }
 
-  Future<PushOutcome> _push(PushRemote request) async {
+  Future<PushOutcome> _push(
+    PushRemote request, {
+    void Function(String)? onProgress,
+  }) async {
     final repo = _repository(request.repositoryPath);
     final remote = repo.remotes.named(request.name);
     if (remote == null) {
@@ -810,6 +864,7 @@ class _Worker {
         remote,
         force: request.force,
         credentials: credentials,
+        onProgress: onProgress,
       );
       if (credentials != null && request.remember) {
         await _credentials.save(remote.pushUrl, credentials);
@@ -937,9 +992,9 @@ class _Worker {
 
   EntryData _write(WriteFile request) {
     final absolute = _resolveForWriting(request.repositoryPath, request.path);
-    final file = File(absolute);
+    final file = git.gitFs.file(absolute);
 
-    if (Directory(absolute).existsSync()) {
+    if (git.gitFs.directory(absolute).existsSync()) {
       throw StateError('${request.path} is a directory');
     }
 
@@ -978,16 +1033,17 @@ class _Worker {
   EntryData _create(CreateEntry request) {
     final absolute = _resolveForWriting(request.repositoryPath, request.path);
 
-    if (File(absolute).existsSync() || Directory(absolute).existsSync()) {
+    if (git.gitFs.file(absolute).existsSync() ||
+        git.gitFs.directory(absolute).existsSync()) {
       throw StateError('${request.path} already exists');
     }
 
     if (request.kind == EntryKind.directory) {
       // Every directory on the way, so `a/b/c` is one action rather than three
       // (`editing.directories-are-created-in-full`).
-      Directory(absolute).createSync(recursive: true);
+      git.gitFs.directory(absolute).createSync(recursive: true);
     } else {
-      File(absolute)
+      git.gitFs.file(absolute)
         ..parent.createSync(recursive: true)
         ..writeAsStringSync('');
     }
@@ -1054,7 +1110,7 @@ class _Worker {
     String path,
   ) {
     final root = repo.workTree ?? repo.gitDirectory;
-    final directory = Directory(
+    final directory = git.gitFs.directory(
       path.isEmpty ? root : p.join(root, path.replaceAll('/', p.separator)),
     );
     if (!directory.existsSync()) return const [];
@@ -1071,7 +1127,7 @@ class _Worker {
       if (path.isEmpty && name == '.git') continue;
       final childPath = path.isEmpty ? name : '$path/$name';
 
-      if (entry is Directory) {
+      if (entry is git.GitFsDirectory) {
         final worst = _worstUnder(states, childPath);
         entries.add(EntryData(
           name: name,
@@ -1094,7 +1150,7 @@ class _Worker {
               (rules.isIgnoredWithin(childPath)
                   ? FileState.ignored
                   : FileState.clean),
-          size: entry is File ? entry.lengthSync() : null,
+          size: entry is git.GitFsFile ? entry.lengthSync() : null,
         ));
       }
     }
@@ -1190,7 +1246,7 @@ class _Worker {
     DateTime? modified;
     if (revision == null) {
       final root = repo.workTree ?? repo.gitDirectory;
-      final file = File(
+      final file = git.gitFs.file(
         p.join(root, request.path.replaceAll('/', p.separator)),
       );
       if (file.existsSync()) modified = file.statSync().modified;
@@ -1265,12 +1321,134 @@ class _Worker {
 
     List<int> after = const [];
     if (root != null) {
-      final file = File(p.join(root, request.path.replaceAll('/', p.separator)));
+      final file =
+          git.gitFs.file(p.join(root, request.path.replaceAll('/', p.separator)));
       if (file.existsSync()) after = file.readAsBytesSync();
     }
 
     final diff = git.diffText(Uint8List.fromList(before), Uint8List.fromList(after));
     return _renderDiff(request.path, diff, 'HEAD and the working tree');
+  }
+
+  BlameData _blame(LoadBlame request) {
+    final repo = _repository(request.repositoryPath);
+
+    // Blame has no notion of a working tree - there is nothing to walk
+    // backwards from until something is committed - so viewing it blames
+    // HEAD, the way the file diff above compares the working tree against
+    // HEAD rather than against nothing.
+    final target = request.revision.revisionString;
+    final at = target == null ? repo.headId : repo.resolve(target);
+    if (at == null) {
+      return BlameData(
+        path: request.path,
+        at: null,
+        lines: const [],
+        unavailable: 'there is nothing committed yet',
+      );
+    }
+
+    // Checked before the walk, not after: blame on a large binary file would
+    // still finish, having spent the whole walk on lines nobody can read.
+    final bytes = repo.readFile(request.path, revision: at.hex);
+    if (bytes != null && git.looksBinary(Uint8List.fromList(bytes))) {
+      return BlameData(
+        path: request.path,
+        at: at.hex,
+        lines: const [],
+        unavailable: 'this is a binary file',
+      );
+    }
+
+    final result = git.blame(repo, request.path, start: at);
+    if (result == null) {
+      return BlameData(
+        path: request.path,
+        at: at.hex,
+        lines: const [],
+        unavailable: 'this file is not present at this revision',
+      );
+    }
+
+    return BlameData(
+      path: result.path,
+      at: result.at.hex,
+      lines: [
+        for (final line in result.lines)
+          BlameLineData(
+            number: line.number,
+            text: line.text,
+            commitId: line.commit.hex,
+            // Already resolved through .mailmap by git_dart itself, so this
+            // reads the same as `git blame` does on the same repository.
+            authorName: line.author.name,
+            authorWhen: line.author.utc,
+            summary: line.summary,
+            originalNumber: line.originalNumber,
+          ),
+      ],
+    );
+  }
+
+  SubmoduleData _submodule(LoadSubmodule request) {
+    final repo = _repository(request.repositoryPath);
+
+    // Null stays null: `submodulesOf` already treats "no commit named" as
+    // HEAD's tree joined with whatever `.gitmodules` says on disk right now,
+    // which is the working-tree view this app wants when no revision is
+    // chosen. A named revision that fails to resolve is a different case -
+    // there is no tree to read gitlinks from at all - and is reported rather
+    // than silently falling back to the working tree.
+    final target = request.revision.revisionString;
+    git.ObjectId? at;
+    if (target != null) {
+      at = repo.resolve(target);
+      if (at == null) {
+        return SubmoduleData(
+          path: request.path,
+          name: request.path,
+          status: SubmoduleStatus.undescribed,
+          unavailable: '$target names nothing here',
+        );
+      }
+    }
+
+    final found = git
+        .submodulesOf(repo, at: at)
+        .where((submodule) => submodule.path == request.path)
+        .firstOrNull;
+    if (found == null) {
+      return SubmoduleData(
+        path: request.path,
+        name: request.path,
+        status: SubmoduleStatus.undescribed,
+        unavailable: 'no submodule is recorded at this path',
+      );
+    }
+
+    // Only offered once something is actually there to open: a submodule
+    // nobody has cloned has nothing behind its path but the gitlink.
+    String? openableAt;
+    final workTree = repo.workTree;
+    if (found.checkedOut != null && workTree != null) {
+      openableAt = p.join(workTree, found.path.replaceAll('/', p.separator));
+    }
+
+    return SubmoduleData(
+      path: found.path,
+      name: found.name,
+      url: found.url,
+      branch: found.branch,
+      recordedCommit: found.recorded?.hex,
+      checkedOutCommit: found.checkedOut?.hex,
+      status: switch (found.state) {
+        git.SubmoduleState.notInitialised => SubmoduleStatus.notInitialised,
+        git.SubmoduleState.current => SubmoduleStatus.current,
+        git.SubmoduleState.moved => SubmoduleStatus.moved,
+        git.SubmoduleState.undescribed => SubmoduleStatus.undescribed,
+      },
+      openableAt: openableAt,
+    );
   }
 
   FileDiff _commitDiff(LoadCommitDiff request) {
@@ -1372,41 +1550,28 @@ class _Worker {
 
 /// The main-isolate side of the worker.
 class GitService {
-  late final SendPort _toWorker;
-  final _pending = <int, Completer<Object?>>{};
-  var _nextId = 0;
+  final WorkerTransport _transport = newWorkerTransport();
 
-  Isolate? _isolate;
-  ReceivePort? _inbox;
+  Future<void> start() => _transport.start();
 
-  Future<void> start() async {
-    final ready = Completer<SendPort>();
-    _inbox = ReceivePort();
-    _inbox!.listen((message) {
-      if (message is SendPort) {
-        ready.complete(message);
-        return;
-      }
-      if (message is! _Reply) return;
-      final completer = _pending.remove(message.id);
-      if (completer == null) return;
-      if (message.error != null) {
-        completer.completeError(GitWorkerException(message.error!));
-      } else {
-        completer.complete(message.value);
-      }
-    });
-
-    _isolate = await Isolate.spawn(gitWorkerMain, _inbox!.sendPort);
-    _toWorker = await ready.future;
-  }
-
-  Future<T> _ask<T>(GitRequest request) {
-    final id = _nextId++;
-    final completer = Completer<Object?>();
-    _pending[id] = completer;
-    _toWorker.send(_Envelope(id, request));
-    return completer.future.then((value) => value as T);
+  Future<T> _ask<T>(
+    GitRequest request, {
+    void Function(T value)? beforePersist,
+    void Function(String)? onProgress,
+  }) async {
+    final value =
+        await _transport.send(request, onProgress: onProgress) as T;
+    // A repository that did not exist before this call has to be registered
+    // before the persist below, or the very first save after creating one
+    // finds nothing to save it under - which is what silently dropped a
+    // fresh clone on reload the first time this ran.
+    beforePersist?.call(value);
+    // Where a repository is a folder, this reaches disk already and there is
+    // nothing to do. In a browser it is the only path back to OPFS, so it
+    // runs after every call rather than only the ones known to write -
+    // forgetting one here would mean silently losing whatever it did.
+    await persistWorkspace();
+    return value;
   }
 
   Future<RepositorySummary> open(String path, String name) =>
@@ -1418,7 +1583,13 @@ class GitService {
       _ask(OpenRepository(path, p.basename(p.normalize(path))));
 
   Future<RepositorySummary> initialise(String path, String name) =>
-      _ask(InitialiseRepository(path, name));
+      _ask<RepositorySummary>(
+        InitialiseRepository(path, name),
+        // As with a clone: a repository that did not exist a moment ago has
+        // to be registered before the persist that follows, or the save
+        // finds nothing to save it under.
+        beforePersist: (_) => trackWorkspaceRepository(path),
+      );
 
   Future<List<EntryData>> directory(
     String repository,
@@ -1440,6 +1611,20 @@ class GitService {
     String path,
   ) =>
       _ask(LoadFileDiff(repository, revision, path));
+
+  Future<BlameData> blame(
+    String repository,
+    Revision revision,
+    String path,
+  ) =>
+      _ask(LoadBlame(repository, revision, path));
+
+  Future<SubmoduleData> submodule(
+    String repository,
+    Revision revision,
+    String path,
+  ) =>
+      _ask(LoadSubmodule(repository, revision, path));
 
   Future<List<CommitData>> history(String repository, {int limit = 100}) =>
       _ask(LoadHistory(repository, limit: limit));
@@ -1540,14 +1725,21 @@ class GitService {
     String? username,
     String? password,
     bool remember = false,
+    void Function(String)? onProgress,
   }) =>
-      _ask(CloneRepository(
-        url,
-        path,
-        username: username,
-        password: password,
-        remember: remember,
-      ));
+      _ask<CloneOutcome>(
+        CloneRepository(
+          url,
+          path,
+          username: username,
+          password: password,
+          remember: remember,
+        ),
+        beforePersist: (outcome) {
+          if (outcome.succeeded) trackWorkspaceRepository(outcome.path!);
+        },
+        onProgress: onProgress,
+      );
 
   Future<FetchOutcome> fetchRemote(
     String repository,
@@ -1555,14 +1747,18 @@ class GitService {
     String? username,
     String? password,
     bool remember = false,
+    void Function(String)? onProgress,
   }) =>
-      _ask(FetchRemote(
-        repository,
-        name,
-        username: username,
-        password: password,
-        remember: remember,
-      ));
+      _ask(
+        FetchRemote(
+          repository,
+          name,
+          username: username,
+          password: password,
+          remember: remember,
+        ),
+        onProgress: onProgress,
+      );
 
   Future<PullOutcome> pullRemote(
     String repository,
@@ -1570,14 +1766,18 @@ class GitService {
     String? username,
     String? password,
     bool remember = false,
+    void Function(String)? onProgress,
   }) =>
-      _ask(PullRemote(
-        repository,
-        name,
-        username: username,
-        password: password,
-        remember: remember,
-      ));
+      _ask(
+        PullRemote(
+          repository,
+          name,
+          username: username,
+          password: password,
+          remember: remember,
+        ),
+        onProgress: onProgress,
+      );
 
   Future<PushOutcome> pushRemote(
     String repository,
@@ -1586,15 +1786,19 @@ class GitService {
     String? username,
     String? password,
     bool remember = false,
+    void Function(String)? onProgress,
   }) =>
-      _ask(PushRemote(
-        repository,
-        name,
-        force: force,
-        username: username,
-        password: password,
-        remember: remember,
-      ));
+      _ask(
+        PushRemote(
+          repository,
+          name,
+          force: force,
+          username: username,
+          password: password,
+          remember: remember,
+        ),
+        onProgress: onProgress,
+      );
 
   Future<StagingArea> staging(String repository) =>
       _ask(LoadStaging(repository));
@@ -1611,10 +1815,7 @@ class GitService {
 
   Future<void> refresh(String repository) => _ask(Refresh(repository));
 
-  void dispose() {
-    _isolate?.kill(priority: Isolate.immediate);
-    _inbox?.close();
-  }
+  void dispose() => _transport.dispose();
 }
 
 class GitWorkerException implements Exception {

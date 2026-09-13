@@ -1,5 +1,7 @@
 # gitexplorer
 
+<img src="assets/icon/gitexplorer_mark.png" alt="GitExplorer logo" width="160">
+
 A folder explorer over git repositories, built on [git_dart](../../packages/git_dart).
 
 Derived from [`apps/gitexplorer/v0`](../../explorer.umsg), which was written

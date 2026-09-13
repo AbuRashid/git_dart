@@ -1,5 +1,7 @@
 # git_dart
 
+<img src="assets/logo/dart_git_mark.png" alt="dart_git logo" width="160">
+
 A pure Dart implementation of git's object system, storage, refs and index,
 derived from [`systems/git/v0`](../../git.umsg).
 

@@ -100,13 +100,13 @@ Future<bool> isAvailable() async {
   }
 }
 
-Future<MemoryGitFs> load(String root, String under) async {
+Future<MemoryGitFs> load(String root, String under, MemoryGitFs? into) async {
   final bytes = await _readAt(_segments(root) + [_archiveName]);
   if (bytes == null) {
     // Nothing stored yet is not an error: it is an empty repository slot.
-    return MemoryGitFs()..markClean();
+    return (into ?? MemoryGitFs())..markClean();
   }
-  return unpackMemoryFs(bytes, under: under);
+  return unpackMemoryFs(bytes, under: under, into: into);
 }
 
 Future<void> save(String root, String under, MemoryGitFs memory) async {

@@ -94,8 +94,17 @@ Uint8List packMemoryFs(MemoryGitFs memory, {String under = ''}) {
 ///
 /// The result is marked clean: it is exactly what the store holds, so none of
 /// it needs writing back.
-MemoryGitFs unpackMemoryFs(Uint8List bytes, {String under = ''}) {
-  final memory = MemoryGitFs();
+///
+/// [into] unpacks alongside what is already there rather than into a fresh
+/// filesystem. That is how several repositories share one: git_dart reads
+/// through a single filesystem at a time, so two repositories have to be two
+/// subtrees rather than two filesystems.
+MemoryGitFs unpackMemoryFs(
+  Uint8List bytes, {
+  String under = '',
+  MemoryGitFs? into,
+}) {
+  final memory = into ?? MemoryGitFs();
   final base = _normalise(under);
 
   if (bytes.length < _magic.length + 5) {

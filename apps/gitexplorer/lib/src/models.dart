@@ -521,3 +521,91 @@ class BlobBytes {
   final Uint8List bytes;
   const BlobBytes(this.bytes);
 }
+
+/// One line of a file, and the commit that introduced it.
+class BlameLineData {
+  final int number;
+  final String text;
+  final String commitId;
+  final String authorName;
+  final DateTime authorWhen;
+
+  /// The first line of the commit's message.
+  final String summary;
+
+  /// Where this line sat when its commit introduced it. Different from
+  /// [number] whenever a later commit added or removed lines above it.
+  final int originalNumber;
+
+  const BlameLineData({
+    required this.number,
+    required this.text,
+    required this.commitId,
+    required this.authorName,
+    required this.authorWhen,
+    required this.summary,
+    required this.originalNumber,
+  });
+}
+
+/// Who last touched each line of a file, as of one commit.
+class BlameData {
+  final String path;
+
+  /// The commit blamed against, full hex — null alongside [unavailable].
+  final String? at;
+  final List<BlameLineData> lines;
+
+  /// Set when there is nothing to attribute: a binary file, or one that does
+  /// not exist at the commit blamed against.
+  final String? unavailable;
+
+  const BlameData({
+    required this.path,
+    required this.at,
+    required this.lines,
+    this.unavailable,
+  });
+}
+
+/// Where a submodule's checkout stands against what the tree records
+/// (`worktree.submodule.SubmoduleState`, mirrored rather than reused so the
+/// worker boundary stays plain data).
+enum SubmoduleStatus { notInitialised, current, moved, undescribed }
+
+/// One submodule: a gitlink joined with what `.gitmodules` and the working
+/// tree say about it.
+class SubmoduleData {
+  final String path;
+  final String name;
+  final String? url;
+  final String? branch;
+
+  /// The commit the tree names, full hex.
+  final String? recordedCommit;
+
+  /// The commit its own checkout is actually on, full hex, or null when
+  /// nothing has been cloned there.
+  final String? checkedOutCommit;
+
+  final SubmoduleStatus status;
+
+  /// Where to open it as a repository of its own, or null when it has not
+  /// been cloned and so there is nothing to open.
+  final String? openableAt;
+
+  /// Set when no submodule is recorded at this path at all.
+  final String? unavailable;
+
+  const SubmoduleData({
+    required this.path,
+    required this.name,
+    required this.status,
+    this.url,
+    this.branch,
+    this.recordedCommit,
+    this.checkedOutCommit,
+    this.openableAt,
+    this.unavailable,
+  });
+}

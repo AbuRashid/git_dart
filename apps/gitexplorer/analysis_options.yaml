@@ -18,6 +18,10 @@ analyzer:
     - windows/**
     - macos/**
     - linux/**
+    # Generated from unimsg's portable vocabulary programs - regenerated
+    # wholesale from their own source, not hand-edited, so this project's
+    # lints are not theirs to satisfy.
+    - lib/src/vault/*.dart
 
 linter:
   # The lint rules applied to this project can be customized in the

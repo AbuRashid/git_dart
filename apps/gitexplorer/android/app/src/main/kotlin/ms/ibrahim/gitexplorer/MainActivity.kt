@@ -11,6 +11,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import org.unimsg.host.SecureHost
 
 /**
  * Answers whether this app may read the files in folders the user picks, and
@@ -30,10 +31,26 @@ class MainActivity : FlutterActivity() {
     /** Held while the user is away in Settings, answered when they return. */
     private var pending: MethodChannel.Result? = null
 
+    /**
+     * The saved-credentials vault, on the versions of Android that can back its
+     * key with the Keystore ([android.security.keystore.KeyGenParameterSpec]'s
+     * combined device-credential/biometric authenticator type needs 13). Left
+     * null below that rather than registered and failing: the Dart side already
+     * treats "no handler answered" as "cannot save", which is exactly true here.
+     */
+    private var secureHost: SecureHost? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result -> onCall(call, result) }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            secureHost = SecureHost(
+                this,
+                MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "org.unimsg/secure-host/v1"),
+            )
+        }
     }
 
     private fun onCall(call: MethodCall, result: MethodChannel.Result) {
@@ -96,6 +113,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (secureHost?.activityResult(requestCode, resultCode) == true) return
         // The Settings screen reports nothing useful in its result code, so what
         // matters is what is true now that we are back.
         if (requestCode == ALL_FILES_REQUEST) answer(isGranted())

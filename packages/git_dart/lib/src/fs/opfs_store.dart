@@ -51,8 +51,10 @@ class OpfsStore {
   /// [under] is the path the repository should appear at, which is what the
   /// rest of git_dart will open it by. It is a name rather than a location —
   /// nothing else can see this filesystem.
-  Future<MemoryGitFs> load({String under = '/repo'}) =>
-      impl.load(root, under);
+  /// [into] reads the repository alongside what is already in that
+  /// filesystem, for an application holding several at once.
+  Future<MemoryGitFs> load({String under = '/repo', MemoryGitFs? into}) =>
+      impl.load(root, under, into);
 
   /// Writes back what changed and removes what went.
   ///

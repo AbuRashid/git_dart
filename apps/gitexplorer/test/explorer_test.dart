@@ -42,6 +42,46 @@ void write(String relative, String contents) {
   file.writeAsStringSync(contents);
 }
 
+/// A store that keeps its file in [directory].
+///
+/// The store itself takes read and write functions rather than a directory,
+/// because it has to compile for the web, where there is no directory to be
+/// given. Putting the file back is the test's business.
+RepositoryStore storeIn(Directory directory) {
+  final file = File(p.join(directory.path, RepositoryStore.fileName));
+  return RepositoryStore(
+    read: (_) async => file.existsSync() ? file.readAsStringSync() : null,
+    write: (_, value) async {
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(value);
+    },
+  );
+}
+
+/// The commit blamed for each final line number, straight from git.
+///
+/// `HEAD` by default and not the working tree - `git blame` with nothing
+/// named blames whatever is on disk, uncommitted changes included, which is
+/// a different question from the one being checked here.
+Map<int, String> _gitBlameShas(String path, [String revision = 'HEAD']) {
+  final output = git(['blame', '--porcelain', revision, '--', path]);
+  final shas = <int, String>{};
+  for (final line in const LineSplitter().convert(output)) {
+    final match = RegExp(r'^([0-9a-f]{40}) \d+ (\d+)').firstMatch(line);
+    if (match != null) shas[int.parse(match.group(2)!)] = match.group(1)!;
+  }
+  return shas;
+}
+
+/// The commit a gitlink names in the tree, straight from git.
+String _gitlinkSha(String repo, String path, [String revision = 'HEAD']) {
+  final output = git(['ls-tree', revision, '--', path], cwd: repo);
+  final match =
+      RegExp(r'^160000 commit ([0-9a-f]{40})').firstMatch(output.trim());
+  if (match == null) fail('no gitlink for $path in $repo at $revision');
+  return match.group(1)!;
+}
+
 void main() {
   setUpAll(() {
     scratch = Directory.systemTemp.createTempSync('gitexplorer_test');
@@ -76,7 +116,7 @@ void main() {
     setUp(() {
       home = Directory(p.join(scratch.path, 'support${_counter++}'))
         ..createSync(recursive: true);
-      store = RepositoryStore(directory: () async => home);
+      store = storeIn(home);
     });
 
     test('round-trips what was added, in the order it was added', () async {
@@ -212,6 +252,40 @@ void main() {
       expect(summary.available, isTrue);
       expect(summary.headId, git(['rev-parse', 'HEAD']).trim());
       expect(File(p.join(into, 'a.txt')).existsSync(), isTrue);
+    });
+
+    test('cloning reports progress along the way, across the worker boundary',
+        () async {
+      // git_dart only bothers reporting progress on a local copy once there
+      // is enough of it to be worth mentioning - `unpackLimit`, 100 objects -
+      // so the fixture has to actually be that big, or nothing would ever
+      // cross the wire to prove the relay works.
+      final big = p.join(scratch.path, 'big-source');
+      Directory(big).createSync(recursive: true);
+      git(['init', '-q', '-b', 'main'], cwd: big);
+      git(['config', 'user.name', 'A'], cwd: big);
+      git(['config', 'user.email', 'a@x'], cwd: big);
+      for (var i = 0; i < 120; i++) {
+        File(p.join(big, 'file$i.txt')).writeAsStringSync('$i\n');
+      }
+      git(['add', '.'], cwd: big);
+      git(['commit', '-q', '-m', 'a lot of files'], cwd: big);
+
+      final into = p.join(scratch.path, 'cloned-with-progress');
+      final seen = <String>[];
+
+      final outcome = await service.cloneRepository(
+        big,
+        into,
+        onProgress: seen.add,
+      );
+
+      expect(outcome.succeeded, isTrue);
+      // Not asserting every word of it - that is git_dart's own contract,
+      // proven by its suite - only that the one message this fixture is
+      // guaranteed to produce actually crossed the worker boundary, which is
+      // the part this test exists to check.
+      expect(seen, contains(contains('packing')));
     });
 
     test('cloning into a folder with something in it is reported, not thrown',
@@ -377,6 +451,45 @@ void main() {
       expect(diff.deletions, 0);
       expect(diff.against, 'HEAD and the working tree');
       expect(diff.hunks.single.lines.last.text, 'three');
+    });
+
+    test('blames a file at HEAD, matching git line for line', () async {
+      final blame = await service.blame(repoPath, Revision.head, 'a.txt');
+      expect(blame.unavailable, isNull);
+      expect(blame.at, git(['rev-parse', 'HEAD']).trim());
+
+      final theirs = _gitBlameShas('a.txt');
+      expect(blame.lines.length, theirs.length);
+      for (final line in blame.lines) {
+        expect(line.commitId, theirs[line.number], reason: 'line ${line.number}');
+      }
+    });
+
+    test('blames a file that changed across two commits, matching git',
+        () async {
+      final blame =
+          await service.blame(repoPath, Revision.head, 'lib/main.dart');
+      final theirs = _gitBlameShas('lib/main.dart');
+      expect(blame.lines.length, theirs.length);
+      for (final line in blame.lines) {
+        expect(line.commitId, theirs[line.number], reason: 'line ${line.number}');
+      }
+    });
+
+    test('blaming the working tree blames HEAD, not the dirty file', () async {
+      // a.txt has an uncommitted third line; blame has nothing to say about
+      // it and reports HEAD's two lines instead.
+      final blame =
+          await service.blame(repoPath, Revision.workingTree, 'a.txt');
+      expect(blame.at, git(['rev-parse', 'HEAD']).trim());
+      expect(blame.lines.length, 2);
+    });
+
+    test('blaming a path that does not exist says why, not with an error',
+        () async {
+      final blame = await service.blame(repoPath, Revision.head, 'nope.txt');
+      expect(blame.unavailable, isNotNull);
+      expect(blame.lines, isEmpty);
     });
 
     test('history matches git rev-list', () async {
@@ -793,6 +906,98 @@ void main() {
       // The worker is still answering, which is the point.
       final summary = await service.open(repoPath, 'repo');
       expect(summary.available, isTrue);
+    });
+
+    group('submodules', () {
+      late String libPath;
+      late String outerPath;
+
+      setUpAll(() {
+        libPath = p.join(scratch.path, 'submodule-lib');
+        Directory(libPath).createSync(recursive: true);
+        git(['init', '-q', '-b', 'main'], cwd: libPath);
+        git(['config', 'user.name', 'A'], cwd: libPath);
+        git(['config', 'user.email', 'a@x'], cwd: libPath);
+        File(p.join(libPath, 'lib.txt')).writeAsStringSync('a library\n');
+        git(['add', '.'], cwd: libPath);
+        git(['commit', '-q', '-m', 'lib commit'], cwd: libPath);
+
+        outerPath = p.join(scratch.path, 'submodule-outer');
+        Directory(outerPath).createSync(recursive: true);
+        git(['init', '-q', '-b', 'main'], cwd: outerPath);
+        git(['config', 'user.name', 'A'], cwd: outerPath);
+        git(['config', 'user.email', 'a@x'], cwd: outerPath);
+        File(p.join(outerPath, 'readme.txt')).writeAsStringSync('outer\n');
+        git(['add', '.'], cwd: outerPath);
+        git(['commit', '-q', '-m', 'outer commit'], cwd: outerPath);
+
+        // Recent git refuses to clone a bare local path unless told it is
+        // allowed to, which `submodule add` does under the hood.
+        for (final path in ['vendor/lib', 'vendor/uninit']) {
+          git([
+            '-c', 'protocol.file.allow=always',
+            'submodule', 'add', '-q', libPath, path,
+          ], cwd: outerPath);
+        }
+        git(['commit', '-q', '-m', 'add submodules'], cwd: outerPath);
+
+        // Deinitialising empties the working tree but leaves the gitlink and
+        // `.gitmodules` entry exactly as committed — the state a fresh clone
+        // is in before anyone runs `submodule update --init`.
+        git(['submodule', 'deinit', '-f', 'vendor/uninit'], cwd: outerPath);
+      });
+
+      test('reports a cloned submodule, matching git', () async {
+        final data =
+            await service.submodule(outerPath, Revision.head, 'vendor/lib');
+        expect(data.unavailable, isNull);
+        expect(data.name, 'vendor/lib');
+        expect(data.url, libPath);
+        expect(data.status, SubmoduleStatus.current);
+        expect(data.recordedCommit, _gitlinkSha(outerPath, 'vendor/lib'));
+
+        final checkedOut = git(['rev-parse', 'HEAD'],
+                cwd: p.join(outerPath, 'vendor', 'lib'))
+            .trim();
+        expect(data.checkedOutCommit, checkedOut);
+        expect(data.checkedOutCommit, data.recordedCommit);
+
+        // What is offered to open really does hold a repository, agreeing
+        // with git about where the submodule's checkout lives.
+        expect(data.openableAt, p.join(outerPath, 'vendor', 'lib'));
+        expect(
+          git(['rev-parse', '--is-inside-work-tree'], cwd: data.openableAt!)
+              .trim(),
+          'true',
+        );
+      });
+
+      test('a submodule with nothing cloned reports so, with nothing to open',
+          () async {
+        final data = await service.submodule(
+            outerPath, Revision.head, 'vendor/uninit');
+        expect(data.unavailable, isNull);
+        expect(data.status, SubmoduleStatus.notInitialised);
+        expect(data.checkedOutCommit, isNull);
+        expect(data.openableAt, isNull);
+        expect(data.url, libPath);
+        expect(data.recordedCommit, _gitlinkSha(outerPath, 'vendor/uninit'));
+
+        // git agrees: a deinitialised submodule's status line starts with
+        // '-', the same sigil `Submodule.statusSigil` reports.
+        final status =
+            git(['submodule', 'status', 'vendor/uninit'], cwd: outerPath);
+        expect(status.trim(), startsWith('-'));
+      });
+
+      test('a path with no submodule recorded says why, not with an error',
+          () async {
+        final data =
+            await service.submodule(outerPath, Revision.head, 'readme.txt');
+        expect(data.unavailable, isNotNull);
+        expect(data.recordedCommit, isNull);
+        expect(data.openableAt, isNull);
+      });
     });
   });
 }

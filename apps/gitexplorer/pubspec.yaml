@@ -34,8 +34,7 @@ flutter:
     # one out of the bundle and hands it to GTK.
     - assets/icon/app_icon_rounded.png
 
-# Masters are drawn by tool/generate_icon.py. After changing them, run
-# `dart run flutter_launcher_icons` to refresh the per-platform icons.
+# All launcher assets are built from the source mark by tool/generate_icon.py.
 flutter_launcher_icons:
   image_path: assets/icon/app_icon.png
   android: true
@@ -46,7 +45,6 @@ flutter_launcher_icons:
   macos:
     generate: true
     image_path: assets/icon/app_icon_macos.png
-  # Windows and Linux are handled by tool/generate_icon.py: it writes a
-  # multi-resolution .ico, which this package does not.
+  # Windows and Linux are handled directly by tool/generate_icon.py.
   windows:
     generate: false

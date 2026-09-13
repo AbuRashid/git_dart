@@ -5,16 +5,22 @@
          written, and the user's own files are invisible. The media permissions
          are no substitute — they cover images, video and audio, and a repository
          is none of those. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <!-- Before scoped storage, reading a shared folder was this instead. -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
 
+    <!-- allowBackup is off because the saved-credentials vault wraps its key
+         with an AndroidKeyStore key, which auto backup cannot restore onto
+         another device - a backed-up vault file would sit there undecryptable
+         forever rather than plainly saying it needs setting up again. -->
     <application
         android:label="Git Explorer"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"

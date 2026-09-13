@@ -1,17 +1,27 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show BrowserContextMenu;
 
 import 'src/generated/tokens.dart';
 import 'src/state.dart';
 import 'src/theme.dart';
 import 'src/ui/detail_pane.dart';
 import 'src/ui/tree_pane.dart';
-import 'src/ui/unsupported_platform.dart';
+import 'src/workspace.dart';
 
-void main() {
-  // The web build compiles but has no filesystem to read a repository from, so
-  // it says as much rather than starting and failing at the first one.
-  runApp(kIsWeb ? const UnsupportedPlatformApp() : const GitExplorerApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // The browser has a right-click menu of its own, and does not know this
+  // app supplies one until told: without this, right-clicking a row opens
+  // both at once, one drawn over the other. A no-op everywhere but the web.
+  if (kIsWeb) await BrowserContextMenu.disableContextMenu();
+
+  // Storage next. In a browser the repositories live in memory backed by
+  // OPFS, and git_dart has to be pointed at that filesystem before anything
+  // tries to open one.
+  await prepareWorkspace();
+  runApp(const GitExplorerApp());
 }
 
 class GitExplorerApp extends StatefulWidget {
