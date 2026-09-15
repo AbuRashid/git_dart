@@ -1,32 +1,31 @@
-# gitexplorer
+# git-dart
 
-Git, reimplemented in Dart, and a Flutter explorer built on it.
+<img src="packages/git_dart/assets/logo/git_dart_mark.png" alt="git_dart logo" width="160">
 
-Both are derived from specifications in this directory, written in
-[unimsg](unimsg-v0.umsg) and following
-[spec-based design](17-spec-based-design.umsg).
+Git, reimplemented in pure Dart — and a Flutter application built on it.
+
+[git_dart](packages/git_dart) reads and writes real repositories with no `git`
+binary, no FFI and no `libgit2`: objects and packs, refs, the index and working
+tree, merge, rebase, cherry-pick and stash, and clone, fetch and push over HTTP,
+ssh and `git://`. It runs on the Dart VM, in Flutter, and in a browser.
+
+[Git Explorer](apps/gitexplorer) is its example application: a repository
+explorer that browses, edits, stages, commits, clones, fetches, pulls and pushes,
+on desktop, mobile and the web.
+
+## What is here
 
 | what | where | derived from |
 | ---- | ----- | ------------ |
 | the git implementation | [packages/git_dart](packages/git_dart) | [git.umsg](git.umsg) |
-| the explorer | [apps/gitexplorer](apps/gitexplorer) | [explorer.umsg](explorer.umsg) |
-| the unimsg parser | [packages/unimsg](packages/unimsg) | [unimsg-v0.umsg](unimsg-v0.umsg) |
+| the explorer application | [apps/gitexplorer](apps/gitexplorer) | [explorer.umsg](explorer.umsg) |
+| a line-by-line syntax tokeniser, used for code and diffs | [packages/syntax_dart](packages/syntax_dart) | |
+| the unimsg parser, formatter, CBOR codec and command-line tool | [packages/unimsg](packages/unimsg) | [unimsg-v0.umsg](unimsg-v0.umsg) |
+| renders any unimsg document as a Flutter page | [packages/unimsg_view](packages/unimsg_view) | |
+| Notepad++ highlighting for `.umsg` files | [editors/notepad++](editors/notepad++) | |
 
-## git_dart
-
-The object model, loose and packed storage, refs, the index, checkout, diff and
-status — no `git` binary, no FFI, no `libgit2`. It reproduces the object names
-pinned in `git.umsg` and agrees with git on real repositories: on the Flutter
-SDK's own checkout it walks 2000 commits in about 0.7s and verifies every one
-of the 17,266 objects in the head tree.
-
-## The explorer
-
-The tree's root is virtual: repositories are added from anywhere on disk and
-shown together, because repositories are wherever they were cloned and a tree
-rooted at a real folder can only show that accident. A repository opens into its
-files at any revision, with a status column on the working tree and a diff
-beside each change.
+The specifications are written in [unimsg](unimsg-v0.umsg) and follow
+[spec-based design](17-spec-based-design.umsg).
 
 ## The specifications
 
@@ -49,6 +48,18 @@ cd packages/git_dart && dart test
 ```
 
 ```bash
+cd packages/syntax_dart && dart test
+```
+
+```bash
+cd packages/unimsg && dart run test/conformance.dart
+```
+
+```bash
+cd packages/unimsg_view && flutter test
+```
+
+```bash
 cd apps/gitexplorer && flutter test --concurrency=1
 ```
 
@@ -56,15 +67,11 @@ cd apps/gitexplorer && flutter test --concurrency=1
 cd apps/gitexplorer && flutter run -d windows
 ```
 
-Both suites build repositories with real git and check this code against
-`git status`, `git ls-tree`, `git rev-list`, `git write-tree`, `git cat-file`
-and `git diff`. Agreement with git is the property that matters; a fixture
-written by hand only proves its author consistent.
+The git_dart and Git Explorer suites build repositories with real git and check
+this code against it, so `git` must be on the PATH. Agreement with git is the
+property that matters; a fixture written by hand only proves its author
+consistent.
 
-## What is not here yet
+## License
 
-In the library: merge, the wire protocols, and packfile writing.
-
-In the application: delete, rename and move, then branch, checkout and merge.
-Fetch, pull and push wait on the transfer protocols in the library — a real
-limit with a known cure, not a decision about scope.
+Apache License 2.0 — see [LICENSE](LICENSE).

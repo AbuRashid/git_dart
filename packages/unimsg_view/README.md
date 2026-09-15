@@ -27,10 +27,11 @@ of you and fails silently on the next one. There is always a next one.
 | `entries` | a map whose values are all non-empty maps — drawn as cards |
 | `outline` | the same, three deep and no more than four wide at any level |
 | `glossary` | a map whose values are all text, at least one of them long |
-| `settings` | a map whose values all fit on a line |
+| `settings` | a map whose values are all plain scalars |
 | `breakdown` | three or more values, all numbers, none negative, one non-zero |
 | `chips` | a sequence holding no collections |
 | `prose` | text of 80 characters or more |
+| `scalar` | any other single value, drawn inline |
 | `fields` | everything else, claiming nothing |
 
 ## Two treatments the corpus vetoed
@@ -115,3 +116,11 @@ renders every `.umsg` file in this repository *and* in the ribosome corpus
 beside it, in both brightnesses, and fails on any exception — the second group
 is the point, since a renderer tested only on the documents its author had
 open agrees with whatever its author was already thinking.
+
+The corpus is a separate repository, looked for at `../../../ribosome/corpus`
+from this package. When it is not there, only this repository's documents are
+rendered.
+
+```bash
+flutter test
+```

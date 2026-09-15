@@ -1,7 +1,7 @@
 name: git_dart
 description: >-
-  A pure Dart implementation of the git object system, storage, refs and index,
-  derived from systems/git/v0 (git.umsg).
+  Git in pure Dart: objects and packs, refs, the index and working tree, merge,
+  rebase and stash, and clone, fetch and push. No git binary, no FFI.
 version: 0.1.0
 publish_to: none
 
