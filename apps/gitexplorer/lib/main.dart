@@ -25,7 +25,12 @@ Future<void> main() async {
 }
 
 class GitExplorerApp extends StatefulWidget {
-  const GitExplorerApp({super.key});
+  /// More actions for the window's bar, before the theme button. Only a build
+  /// that wraps the app supplies any — the hosted demo, in main_demo.dart.
+  final List<Widget> Function(BuildContext context, ExplorerState state)?
+      actions;
+
+  const GitExplorerApp({super.key, this.actions});
 
   @override
   State<GitExplorerApp> createState() => _GitExplorerAppState();
@@ -66,7 +71,7 @@ class _GitExplorerAppState extends State<GitExplorerApp> {
             if (snapshot.hasError) {
               return Scaffold(body: Center(child: Text('${snapshot.error}')));
             }
-            return ExplorerPage(state: _state);
+            return ExplorerPage(state: _state, actions: widget.actions);
           },
         ),
       ),
@@ -79,13 +84,17 @@ class _GitExplorerAppState extends State<GitExplorerApp> {
 class ExplorerPage extends StatelessWidget {
   final ExplorerState state;
 
+  /// See [GitExplorerApp.actions].
+  final List<Widget> Function(BuildContext context, ExplorerState state)?
+      actions;
+
   /// Below this width the panes stack instead of sitting side by side.
   static const double breakpoint = 720;
 
   /// The tree pane's width when both are shown.
   static const double sidebarWidth = 320;
 
-  const ExplorerPage({super.key, required this.state});
+  const ExplorerPage({super.key, required this.state, this.actions});
 
   @override
   Widget build(BuildContext context) {
@@ -108,7 +117,10 @@ class ExplorerPage extends StatelessWidget {
                   : null,
               // Adding a repository belongs beside the list it adds to, not
               // in the window's bar, so it lives in the tree pane's header.
-              actions: [ThemeButton(state: state)],
+              actions: [
+                ...?actions?.call(context, state),
+                ThemeButton(state: state),
+              ],
             ),
             body: wide
                 ? Row(
