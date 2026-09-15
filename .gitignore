@@ -1,0 +1,4 @@
+# Tool caches and build output in the packages. apps/gitexplorer has its own
+# .gitignore; these are the ones nothing covered, and they had been committed.
+.dart_tool/
+packages/*/build/
