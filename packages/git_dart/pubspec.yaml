@@ -3,7 +3,8 @@ description: >-
   Git in pure Dart: objects and packs, refs, the index and working tree, merge,
   rebase and stash, and clone, fetch and push. No git binary, no FFI.
 version: 0.1.0
-publish_to: none
+repository: https://github.com/AbuRashid/git_dart/tree/main/packages/git_dart
+issue_tracker: https://github.com/AbuRashid/git_dart/issues
 
 environment:
   # 3.5 for extension types, which the OPFS interop is written with. The app

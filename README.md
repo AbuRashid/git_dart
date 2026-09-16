@@ -1,4 +1,4 @@
-# git-dart
+# git_dart
 
 <img src="packages/git_dart/assets/logo/git_dart_mark.png" alt="git_dart logo" width="160">
 
