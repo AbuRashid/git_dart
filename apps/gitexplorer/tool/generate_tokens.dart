@@ -18,7 +18,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:unimsg/unimsg.dart';
 
-const _specification = 'explorer.umsg';
+const _specification = 'specs/explorer.umsg';
 const _output = 'lib/src/generated/tokens.dart';
 
 /// Renders the tokens from the text of explorer.umsg.

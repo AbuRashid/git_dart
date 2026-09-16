@@ -17,15 +17,14 @@ on desktop, mobile and the web.
 
 | what | where | derived from |
 | ---- | ----- | ------------ |
-| the git implementation | [packages/git_dart](packages/git_dart) | [git.umsg](git.umsg) |
-| the explorer application | [apps/gitexplorer](apps/gitexplorer) | [explorer.umsg](explorer.umsg) |
+| the git implementation | [packages/git_dart](packages/git_dart) | [git.umsg](specs/git.umsg) |
+| the explorer application | [apps/gitexplorer](apps/gitexplorer) | [explorer.umsg](specs/explorer.umsg) |
 | a line-by-line syntax tokeniser, used for code and diffs | [packages/syntax_dart](packages/syntax_dart) | |
-| the unimsg parser, formatter, CBOR codec and command-line tool | [packages/unimsg](packages/unimsg) | [unimsg-v0.umsg](unimsg-v0.umsg) |
+| the unimsg parser, formatter, CBOR codec and command-line tool | [packages/unimsg](packages/unimsg) | [unimsg-v0.umsg](specs/unimsg-v0.umsg) |
 | renders any unimsg document as a Flutter page | [packages/unimsg_view](packages/unimsg_view) | |
-| Notepad++ highlighting for `.umsg` files | [editors/notepad++](editors/notepad++) | |
 
-The specifications are written in [unimsg](unimsg-v0.umsg) and follow
-[spec-based design](17-spec-based-design.umsg).
+The specifications are written in [unimsg](specs/unimsg-v0.umsg) and follow
+[spec-based design](specs/17-spec-based-design.umsg).
 
 ## The specifications
 

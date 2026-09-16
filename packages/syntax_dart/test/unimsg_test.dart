@@ -140,7 +140,7 @@ void main() {
   });
 
   group('over the specification itself', () {
-    final file = File('../../unimsg-v0.umsg');
+    final file = File('../../specs/unimsg-v0.umsg');
 
     test('is tokenised without losing text', () {
       if (!file.existsSync()) {

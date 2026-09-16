@@ -112,14 +112,8 @@ built once when the file is opened.
 ## Tests
 
 `shape_test.dart` and `notes_test.dart` cover the decisions. `render_test.dart`
-renders every `.umsg` file in this repository *and* in the ribosome corpus
-beside it, in both brightnesses, and fails on any exception — the second group
-is the point, since a renderer tested only on the documents its author had
-open agrees with whatever its author was already thinking.
-
-The corpus is a separate repository, looked for at `../../../ribosome/corpus`
-from this package. When it is not there, only this repository's documents are
-rendered.
+renders every specification in this repository's `specs/`, in both
+brightnesses, and fails on any exception.
 
 ```bash
 flutter test

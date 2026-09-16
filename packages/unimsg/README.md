@@ -1,7 +1,7 @@
 # unimsg v0 — pure Dart
 
 A dependency-free Dart implementation of the provisional format described by
-[`../../unimsg-v0.umsg`](../../unimsg-v0.umsg). It provides a parser,
+[`../../specs/unimsg-v0.umsg`](../../specs/unimsg-v0.umsg). It provides a parser,
 canonical formatter, deterministic CBOR encoder, strict CBOR decoder, library
 API, and command-line tool.
 
@@ -10,7 +10,7 @@ API, and command-line tool.
 ```text
 dart pub get
 dart run unimsg help
-dart run unimsg check ../../unimsg-v0.umsg
+dart run unimsg check ../../specs/unimsg-v0.umsg
 dart run unimsg encode message.umsg -o message.cbor
 dart run unimsg decode message.cbor -o message.umsg
 dart run unimsg format message.umsg

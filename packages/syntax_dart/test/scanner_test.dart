@@ -168,7 +168,7 @@ Grammar get dartGrammarForTest => grammars['dart']!;
 /// paths long enough that listing them fails on Windows, and none of it is
 /// source anyway.
 const _sourceDirectories = [
-  '../..',
+  '../../specs',
   '../../packages/unimsg/lib',
   '../../packages/git_dart/lib',
   '../../apps/gitexplorer/lib',
@@ -180,9 +180,9 @@ List<File> _repositoryFiles() {
   for (final path in _sourceDirectories) {
     final directory = Directory(path);
     if (!directory.existsSync()) continue;
-    // The repository root is listed shallowly, for the .umsg files at the top
-    // of it; the source directories are walked.
-    final recursive = path != '../..';
+    // The specs directory is listed shallowly, for the .umsg files in it;
+    // the source directories are walked.
+    final recursive = path != '../../specs';
     files.addAll(directory
         .listSync(recursive: recursive, followLinks: false)
         .whereType<File>());

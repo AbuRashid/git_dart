@@ -1,6 +1,6 @@
 // GENERATED FILE — DO NOT EDIT.
 //
-// Written by tool/generate_tokens.dart from explorer.umsg.
+// Written by tool/generate_tokens.dart from specs/explorer.umsg.
 // Edit that document and re-run the tool; the build checks
 // this file against it.
 //

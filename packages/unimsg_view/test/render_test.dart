@@ -5,29 +5,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:unimsg/unimsg.dart' as u;
 import 'package:unimsg_view/unimsg_view.dart';
 
-/// The documents this was written against, and a handful more that it was
-/// not. The second group is the point: a renderer tested only on the
-/// documents its author had open agrees with whatever its author was already
-/// thinking.
-List<File> _documents() {
-  final files = <File>[
-    for (final name in const [
-      'explorer.umsg',
-      'unimsg-v0.umsg',
-      'git.umsg',
-      '17-spec-based-design.umsg',
-    ])
-      File('../../$name'),
-  ];
-  final corpus = Directory('../../../ribosome/corpus');
-  if (corpus.existsSync()) {
-    files.addAll(corpus
-        .listSync()
-        .whereType<File>()
-        .where((file) => file.path.endsWith('.umsg')));
-  }
-  return files.where((file) => file.existsSync()).toList();
-}
+/// The specifications in this repository.
+List<File> _documents() => [
+      for (final name in const [
+        'explorer.umsg',
+        'unimsg-v0.umsg',
+        'git.umsg',
+        '17-spec-based-design.umsg',
+      ])
+        File('../../specs/$name'),
+    ].where((file) => file.existsSync()).toList();
 
 Future<void> pumpDocument(
   WidgetTester tester,
@@ -86,7 +73,7 @@ void main() {
         (tester) async {
       // Laying out a section is where an overflow or a bad constraint
       // surfaces, and most sections are below the fold when the file opens.
-      final file = File('../../explorer.umsg');
+      final file = File('../../specs/explorer.umsg');
       if (!file.existsSync()) {
         markTestSkipped('explorer.umsg not found');
         return;

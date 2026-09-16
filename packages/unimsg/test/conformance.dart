@@ -36,7 +36,7 @@ void main() {
 void _selfHosting() {
   // Vendored into packages/unimsg, so the specification it self-hosts against
   // is two directories up rather than one.
-  final source = File('../../unimsg-v0.umsg').readAsStringSync();
+  final source = File('../../specs/unimsg-v0.umsg').readAsStringSync();
   final document = parse(source);
   final first = encode(document.value);
   // The encoded length was pinned here at 19240 against an earlier revision of

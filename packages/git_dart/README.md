@@ -9,7 +9,7 @@ No `git` binary, no FFI, no `libgit2`. It reads and writes real repositories —
 ones git made, and ones git can read back — on the Dart VM, in Flutter, and in a
 browser.
 
-Derived from [`systems/git/v0`](../../git.umsg).
+Derived from [`systems/git/v0`](../../specs/git.umsg).
 
 ## What it does
 

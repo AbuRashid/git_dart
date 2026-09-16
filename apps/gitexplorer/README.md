@@ -7,7 +7,7 @@ A folder explorer over git repositories, built on
 library, and a real one: it browses, edits, commits, clones, fetches, pulls and
 pushes, on Windows, macOS, Linux, Android, iOS and the web.
 
-Derived from [`apps/gitexplorer/v0`](../../explorer.umsg), which was written
+Derived from [`apps/gitexplorer/v0`](../../specs/explorer.umsg), which was written
 before this code and generates part of it.
 
 ## What it does
