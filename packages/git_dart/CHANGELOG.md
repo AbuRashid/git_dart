@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- Web is now a supported platform on pub.dev. The ssh and `git://` transports
+  (`SshConnection`, `DaemonConnection`) and `IoGitFs` were the only parts
+  importing `dart:io` unconditionally; they now come from conditional imports,
+  with browser stand-ins that throw a clear `UnsupportedError`.
+- `splitSshCommand` is available as a top-level function.
+
 ## 0.1.0
 
 First release.

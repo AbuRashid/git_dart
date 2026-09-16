@@ -19,7 +19,8 @@ export 'src/diff/tree_diff.dart';
 // The `fs` getter stays internal: it is how this package reaches the
 // filesystem, not something an importer should find in its own namespace.
 export 'src/fs/git_fs.dart' hide fs;
-export 'src/fs/io_git_fs.dart';
+export 'src/fs/io_git_fs.dart'
+    if (dart.library.js_interop) 'src/fs/io_git_fs_web.dart';
 export 'src/fs/memory_archive.dart';
 export 'src/fs/memory_git_fs.dart';
 export 'src/fs/opfs_store.dart';
