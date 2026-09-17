@@ -31,7 +31,6 @@ import '../fs/git_fs.dart';
 import '../index/git_index.dart';
 import '../config/config_writer.dart';
 import '../repository.dart';
-import 'attributes.dart';
 import 'ignore.dart';
 import 'status.dart';
 
@@ -274,10 +273,7 @@ SparseCheckoutResult applySparseCheckout(
       }
       file.parent.createSync(recursive: true);
       file.writeAsBytesSync(
-        toWorkingTree(
-          raw.content,
-          repository.attributes.conversionFor(entry.path, raw.content),
-        ),
+        repository.convertToWorkTree(entry.path, raw.content),
         flush: true,
       );
       restored.add(entry.path);

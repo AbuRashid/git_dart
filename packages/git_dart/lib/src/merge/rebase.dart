@@ -1,3 +1,5 @@
+import '../hooks/hook_steps.dart';
+import '../hooks/hooks.dart';
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/identity.dart';
@@ -57,10 +59,16 @@ class RebaseResult {
 /// there by hand, or cherry-picked earlier — produces nothing and is dropped,
 /// which is what git does and is why a rebase after a merged pull request
 /// usually has less to do than expected.
+///
+/// A rebase with something to do first runs `pre-rebase` with [onto]'s name,
+/// and a failing hook throws [HookFailedException] before anything moves;
+/// [noVerify] skips it, as `git rebase --no-verify` does. Moving to the new
+/// base then runs `post-checkout`, as git's own checkout of `onto` does.
 RebaseResult rebase(
   Repository repository,
   ObjectId onto, {
   Identity? committer,
+  bool noVerify = false,
 }) {
   final workTree = repository.workTree;
   if (workTree == null) {
@@ -88,11 +96,16 @@ RebaseResult rebase(
     return RebaseResult(outcome: RebaseOutcome.alreadyThere, head: head);
   }
 
+  // Asked only once there is something to do: git reports a branch already
+  // up to date without consulting the hook.
+  if (!noVerify) runHook(repository, 'pre-rebase', arguments: [base.hex]);
+
   final todo = commitsToReplay(repository, head, base);
 
   if (todo.isEmpty) {
     // Nothing of our own since the base: the branch simply moves forward.
     reset(repository, base, mode: ResetMode.hard);
+    _postCheckout(repository, head, base);
     final branch = repository.refs.currentBranch;
     if (branch != null) {
       repository.refs.write(branch, base, reflogMessage: 'rebase: fast-forward');
@@ -107,6 +120,7 @@ RebaseResult rebase(
   // on top of what is already there, which is what makes this a replay rather
   // than a diff of the two ends.
   reset(repository, base, mode: ResetMode.hard);
+  _postCheckout(repository, head, base);
 
   return _replay(
     repository,
@@ -117,6 +131,14 @@ RebaseResult rebase(
     replayed: const [],
   );
 }
+
+void _postCheckout(Repository repository, ObjectId from, ObjectId to) =>
+    runHook(
+      repository,
+      'post-checkout',
+      arguments: [from.hex, to.hex, '1'],
+      veto: false,
+    );
 
 /// The commits to replay: those on [head]'s first-parent line that [onto] does
 /// not already have, oldest first.

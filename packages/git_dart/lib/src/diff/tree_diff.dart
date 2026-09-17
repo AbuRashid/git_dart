@@ -196,6 +196,22 @@ void _expand(
   ));
 }
 
+/// Pairs the additions and deletions in [changes] into renames, the same two
+/// passes [diffTrees] makes.
+///
+/// For a caller that already has its changes without having two trees to
+/// walk — a merge compares flattened trees, some of which were never written.
+/// [changes] must be sorted by path, which is what keeps ties deterministic.
+/// [limit] bounds the similarity pass by deletions times additions; exact
+/// renames are always found.
+List<DiffEntry> pairRenames(
+  ObjectStore objects,
+  List<DiffEntry> changes, {
+  int threshold = 50,
+  int limit = 1000,
+}) =>
+    _pairRenames(objects, changes, threshold: threshold, limit: limit);
+
 List<DiffEntry> _pairRenames(
   ObjectStore objects,
   List<DiffEntry> changes, {

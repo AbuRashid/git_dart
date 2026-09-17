@@ -10,6 +10,8 @@ import 'diff/tree_diff.dart';
 import 'fs/git_fs.dart';
 import 'graph/commit_graph.dart';
 import 'graph/graph_walks.dart';
+import 'hooks/hook_steps.dart';
+import 'hooks/hooks.dart';
 import 'index/git_index.dart';
 import 'object_id.dart';
 import 'objects/commit.dart';
@@ -21,9 +23,11 @@ import 'refs/ref_store.dart';
 import 'refs/mailmap.dart';
 import 'refs/reflog.dart';
 import 'remote/remote.dart';
+import 'signing/signature.dart';
 import 'storage/object_store.dart';
 import 'worktree/attributes.dart';
 import 'worktree/checkout.dart';
+import 'worktree/filters.dart';
 import 'worktree/ignore.dart';
 import 'worktree/status.dart';
 
@@ -143,6 +147,22 @@ class Repository {
   }
 
   bool get isBare => workTree == null;
+
+  /// Who runs this repository's hooks.
+  ///
+  /// [HookRunner.disk] unless changed: the hooks git would run, found where
+  /// git would find them — and, in a browser, none. Set [HookRunner.none] to
+  /// run no hooks at all, or [HookRunner.inProcess] to run Dart callbacks in
+  /// their place. Commits, merges, checkouts, rebases and pushes all ask this
+  /// runner, at the points git runs the same hooks.
+  HookRunner hooks = HookRunner.disk;
+
+  /// What makes and checks signatures for this repository.
+  ///
+  /// By default the programs git itself runs — `gpg`, `gpgsm`, `ssh-keygen` —
+  /// which needs `dart:io`. In a browser the default refuses; an app that
+  /// wants signatures there, or a test that wants no processes, sets its own.
+  SignatureTool signatureTool = SignatureTool.platformDefault;
 
   GitConfig? _config;
 
@@ -328,6 +348,51 @@ class Repository {
   Attributes get attributes => _attributes ??= workTree == null
       ? Attributes()
       : loadAttributes(workTree!, commonDirectory, config: config);
+
+  /// In-process filter drivers for this repository, by the name
+  /// `filter=<name>` gives them.
+  ///
+  /// These win over [FilterDriver.registry] and over any
+  /// `filter.<name>.clean` / `filter.<name>.smudge` command in the config. On
+  /// the web they are the only drivers that can run.
+  final Map<String, FilterDriver> filters = {};
+
+  late final ContentFilters _contentFilters = ContentFilters(
+    config: config,
+    workTree: workTree,
+    registered: filters,
+  );
+
+  /// [raw], read from the working tree at [path], in the form git stores:
+  /// the filter driver's clean step, then line-ending conversion.
+  ///
+  /// git's `convert_to_git`, in its order — the driver sees the file exactly
+  /// as it is on disk, and endings are normalised in what it produced.
+  Uint8List convertToGit(String path, Uint8List raw) {
+    final attributes = this.attributes;
+    final cleaned = _contentFilters.clean(
+      path,
+      ContentFilters.driverName(attributes.forPath(path)),
+      raw,
+    );
+    return toStorage(cleaned, attributes.conversionFor(path, cleaned));
+  }
+
+  /// [stored], a blob for [path], in the form written to the working tree:
+  /// line-ending conversion, then the filter driver's smudge step.
+  ///
+  /// git's `convert_to_working_tree`: the reverse of [convertToGit], so the
+  /// driver again sees working-tree line endings.
+  Uint8List convertToWorkTree(String path, Uint8List stored) {
+    final attributes = this.attributes;
+    final converted =
+        toWorkingTree(stored, attributes.conversionFor(path, stored));
+    return _contentFilters.smudge(
+      path,
+      ContentFilters.driverName(attributes.forPath(path)),
+      converted,
+    );
+  }
 
   void close() => objects.close();
 
@@ -763,10 +828,17 @@ class Repository {
   /// HEAD becomes symbolic when [revision] names a branch and direct
   /// otherwise, which is the whole of what "detached HEAD" means
   /// (`refs.head`).
+  ///
+  /// The `post-checkout` hook runs afterwards with the old and new HEAD and a
+  /// flag of 1, as it does for `git checkout <branch>`; its exit status
+  /// changes nothing, since the checkout has already happened. [runHooks] is
+  /// false only for operations that move HEAD as a step of their own — a
+  /// fast-forward merge runs `post-merge`, not `post-checkout`.
   CheckoutResult checkout(
     String revision, {
     bool force = false,
     bool detach = false,
+    bool runHooks = true,
   }) {
     final id = resolve(revision);
     if (id == null) {
@@ -778,6 +850,7 @@ class Repository {
     }
 
     final from = _describeHeadPosition();
+    final previousHead = headId;
     final result = checkoutTree(this, tree, force: force);
 
     final branch = _branchNamed(revision);
@@ -793,6 +866,18 @@ class Repository {
         'HEAD',
         peel(id) is Commit ? (peel(id) as Commit).id : id,
         reflogMessage: 'checkout: moving from $from to $revision',
+      );
+    }
+    if (runHooks) {
+      runHook(
+        this,
+        'post-checkout',
+        arguments: [
+          (previousHead ?? ObjectId.zero).hex,
+          (headId ?? ObjectId.zero).hex,
+          '1',
+        ],
+        veto: false,
       );
     }
     return result;
@@ -1199,7 +1284,16 @@ class Repository {
     String? message,
     Identity? tagger,
     bool force = false,
+    bool? sign,
+    String? signingKey,
   }) {
+    if (sign == true && message == null) {
+      throw ArgumentError.value(
+        sign,
+        'sign',
+        'only an annotated tag can be signed; give it a message',
+      );
+    }
     final problem = branchNameProblem(name);
     if (problem != null) throw ArgumentError.value(name, 'name', problem);
 
@@ -1228,7 +1322,7 @@ class Repository {
       );
     }
 
-    final object = Tag(
+    var object = Tag(
       target: target,
       targetKind: objects.read(target).kind,
       name: name.startsWith('refs/tags/')
@@ -1239,9 +1333,133 @@ class Repository {
         utf8.encode(message.endsWith('\n') ? message : '$message\n'),
       ),
     );
+    // A tag's signature is not a header but the end of its message: the tag
+    // is signed as written, and the signature appended after it. Only
+    // annotated tags: with no message there is no object to sign, and a
+    // lightweight tag stays lightweight whatever `tag.gpgSign` says.
+    if (sign ?? config.boolean('tag.gpgSign') ?? false) {
+      final signature = signPayload(
+        object.content,
+        signingKey: signingKey,
+        signer: who,
+      );
+      object = Tag(
+        target: object.target,
+        targetKind: object.targetKind,
+        name: object.name,
+        tagger: who,
+        rawMessage: Uint8List.fromList([
+          ...object.rawMessage,
+          ...utf8.encode(signature),
+        ]),
+      );
+    }
     final id = objects.write(object);
     refs.write(path, id, reflogMessage: 'tag: created');
     return id;
+  }
+
+  // ---- signatures ----------------------------------------------------------
+
+  /// Signs [payload] in the `gpg.format` this repository is configured for,
+  /// returning the armoured signature with a final newline.
+  ///
+  /// The key is [signingKey], else `user.signingKey`, else — for OpenPGP and
+  /// X.509 only — [signer]'s `Name <email>`, which gpg resolves to a secret
+  /// key by user id. SSH has no such lookup: a key has to be named.
+  String signPayload(
+    Uint8List payload, {
+    String? signingKey,
+    Identity? signer,
+  }) {
+    final format = SignatureFormat.configured(config);
+    var key = signingKey ?? config['user.signingKey'];
+    if (key == null && format != SignatureFormat.ssh) {
+      final who = signer ?? identityFromConfig();
+      if (who != null) key = '${who.name} <${who.email}>';
+    }
+    if (key == null || key.isEmpty) {
+      throw StateError(
+        format == SignatureFormat.ssh
+            ? 'user.signingKey needs to be set for ssh signing'
+            : 'no signing key: set user.signingKey, or user.name and '
+                'user.email',
+      );
+    }
+    return signatureTool.sign(
+      payload,
+      SigningRequest(format: format, key: key, config: config),
+    );
+  }
+
+  /// Checks the signature on commit [id] — `git verify-commit`.
+  ///
+  /// An unsigned commit is not an error: its result is
+  /// [SignatureStatus.none], which is what `%G?` says of it.
+  SignatureCheck verifyCommit(ObjectId id) {
+    final commit = objects.readTyped<Commit>(id);
+    final split = splitSignedCommit(commit.content);
+    return _verify(split.payload, split.signature, commit.committer.seconds);
+  }
+
+  /// Checks the signature on tag object [id] — `git verify-tag`.
+  ///
+  /// [id] names the tag object, not what it points at: a lightweight tag has
+  /// no object to carry a signature, and is refused.
+  SignatureCheck verifyTag(ObjectId id) {
+    final object = objects.read(id);
+    if (object is! Tag) {
+      throw ArgumentError.value(id, 'id', 'is not a tag object');
+    }
+    final split = splitSignedTag(object.content);
+    return _verify(split.payload, split.signature, object.tagger?.seconds);
+  }
+
+  SignatureCheck _verify(Uint8List payload, String? signature, int? when) {
+    if (signature == null) {
+      return SignatureCheck(
+        result: SignatureStatus.none,
+        output: 'no signature found\n',
+        payload: payload,
+      );
+    }
+    final format = SignatureFormat.of(signature);
+    if (format == null) {
+      // Git dies here; a result says the same without taking the caller down.
+      return SignatureCheck(
+        result: SignatureStatus.none,
+        output: 'bad/incompatible signature\n',
+        payload: payload,
+        signature: signature,
+      );
+    }
+
+    // Read before running anything, so a typo is reported as a typo rather
+    // than as whatever the program said.
+    final minimumSetting = config['gpg.minTrustLevel'];
+    var minimum = TrustLevel.undefined;
+    if (minimumSetting != null) {
+      minimum = TrustLevel.byName(minimumSetting) ??
+          (throw StateError(
+            "invalid value for 'gpg.minTrustLevel': '$minimumSetting'",
+          ));
+    }
+
+    final check = signatureTool.verify(
+      payload,
+      signature,
+      VerificationRequest(
+        format: format,
+        config: config,
+        payloadTimestamp: when,
+      ),
+    );
+    return check.copyWith(
+      minimumTrust: minimum,
+      payload: payload,
+      signature: signature,
+      format: format,
+    );
   }
 
   /// Removes a tag. The object it pointed at is left alone; what makes it
@@ -1401,9 +1619,7 @@ class Repository {
 
     // What is stored is the converted form, not what is on disk. A symlink's
     // target is a path and is never converted.
-    final content = isSymlink
-        ? raw
-        : toStorage(raw, attributes.conversionFor(path, raw));
+    final content = isSymlink ? raw : convertToGit(path, raw);
     final id = objects.write(Blob(content));
 
     // The mode git already recorded wins, so staging on Windows — where the
@@ -1557,12 +1773,26 @@ class Repository {
   /// merged into (`objects.commit-format`).
   ///
   /// [message] may be empty when a merge prepared one in `MERGE_MSG`.
+  ///
+  /// The commit hooks run as they do for `git commit -m`: `pre-commit` first,
+  /// before the index is read, so a hook that stages something has it
+  /// committed; then `prepare-commit-msg` and `commit-msg` on the message in
+  /// `COMMIT_EDITMSG`, either of which may rewrite it; and `post-commit` once
+  /// the branch has moved. A failing `pre-commit`, `prepare-commit-msg` or
+  /// `commit-msg` throws [HookFailedException] with nothing written.
+  /// [noVerify] skips `pre-commit` and `commit-msg`, and only those, as
+  /// `--no-verify` does.
   ObjectId commitIndex({
     String message = '',
     Identity? author,
     Identity? committer,
     bool allowEmpty = false,
+    bool noVerify = false,
+    bool? sign,
+    String? signingKey,
   }) {
+    if (!noVerify) runHook(this, 'pre-commit', commitEnvironment: true);
+
     final index = this.index;
     if (index == null || index.entries.isEmpty) {
       if (!allowEmpty) throw StateError('nothing is staged');
@@ -1572,7 +1802,8 @@ class Repository {
     }
 
     final merging = mergeHead;
-    final text = message.trim().isEmpty ? (mergeMessage ?? '') : message;
+    final fromMerge = message.trim().isEmpty && mergeMessage != null;
+    var text = message.trim().isEmpty ? (mergeMessage ?? '') : message;
     if (text.trim().isEmpty) {
       throw StateError('a commit message is required');
     }
@@ -1596,6 +1827,17 @@ class Repository {
       }
     }
 
+    text = messageThroughHooks(
+      this,
+      message: text,
+      file: p.join(gitDirectory, 'COMMIT_EDITMSG'),
+      source: fromMerge ? 'merge' : 'message',
+      noVerify: noVerify,
+    );
+    if (text.trim().isEmpty) {
+      throw StateError('a hook left the commit message empty');
+    }
+
     final id = commitTree(
       tree: tree,
       message: text,
@@ -1606,9 +1848,12 @@ class Repository {
         if (merging != null) merging,
       ],
       reflogMessage: merging != null ? 'commit (merge)' : 'commit',
+      sign: sign,
+      signingKey: signingKey,
     );
 
     if (merging != null) clearMergeState();
+    runHook(this, 'post-commit', commitEnvironment: true, veto: false);
     return id;
   }
 
@@ -1619,6 +1864,13 @@ class Repository {
   /// "committing" is: new objects, and one ref moved (`refs.doc`).
   ///
   /// [tree] must already be written. Returns the new commit's name.
+  ///
+  /// [sign] asks for a signature; left null, `commit.gpgSign` decides, as it
+  /// does for every git command that makes a commit on the user's behalf —
+  /// merge, cherry-pick and rebase included. The signature is made over the
+  /// finished commit and goes in a `gpgsig` header after all the others,
+  /// which is where git puts it and so where git looks for it. [signingKey]
+  /// overrides `user.signingKey`.
   ObjectId commitTree({
     required ObjectId tree,
     required String message,
@@ -1627,15 +1879,33 @@ class Repository {
     List<ObjectId>? parents,
     bool updateHead = true,
     String reflogMessage = 'commit',
+    bool? sign,
+    String? signingKey,
   }) {
     final currentHead = headId;
-    final commit = Commit.build(
+    final who = committer ?? author;
+    var commit = Commit.build(
       tree: tree,
       parents: parents ?? [if (currentHead != null) currentHead],
       author: author,
-      committer: committer ?? author,
+      committer: who,
       message: message.endsWith('\n') ? message : '$message\n',
     );
+    if (sign ?? config.boolean('commit.gpgSign') ?? false) {
+      final signature = signPayload(
+        commit.content,
+        signingKey: signingKey,
+        signer: who,
+      );
+      commit = Commit(
+        tree: commit.tree,
+        parents: commit.parents,
+        author: commit.author,
+        committer: commit.committer,
+        rawMessage: commit.rawMessage,
+        extraHeaders: [...commit.extraHeaders, commitSignatureLine(signature)],
+      );
+    }
     final id = objects.write(commit);
 
     if (updateHead) {

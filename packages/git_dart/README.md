@@ -17,13 +17,15 @@ Derived from [`systems/git/v0`](../../specs/git.umsg).
 | ---- | ------------ | ----------------- |
 | objects and storage | loose objects, packs with both delta kinds, alternates, commit-graph read and write | `Repository.init` / `open` / `discover`, `writeObject`, `commitTree`, `writeCommitGraph` |
 | refs | loose and packed refs with locking, the reflog, revision syntax (`HEAD~2^{tree}`, `:path`, `:/message`, `@{n}`, `@{-n}`), branches, lightweight and annotated tags, upstreams and ahead/behind | `resolve`, `createBranch`, `renameBranch`, `deleteBranch`, `createTag`, `trackingFor`, `countAheadBehind` |
-| index and working tree | index v2 and v3, staging, status, checkout, reset (soft, mixed, hard), `.gitignore` with global excludes, `.gitattributes`, sparse checkout, linked worktrees, submodules (read) | `stage`, `unstage`, `commitIndex`, `status`, `checkout`, `reset`, `setSparseCheckout` |
+| index and working tree | index v2 and v3, staging, status, checkout, reset (soft, mixed, hard), `.gitignore` with global excludes, `.gitattributes` (eol conversion and clean/smudge filter drivers), sparse checkout, linked worktrees, submodules (read) | `stage`, `unstage`, `commitIndex`, `status`, `checkout`, `reset`, `setSparseCheckout`, `Repository.filters` |
 | diff | tree diff with exact and similarity rename detection, Myers line diff with hunks, blame, file history that follows renames | `diff`, `changesIn`, `diffBlobs`, `blame`, `fileHistory` |
-| history | three-way merge with a recursive merge base, fast-forwards, conflict markers and index stages; rebase; cherry-pick and revert; stash | `merge`, `abortMerge`, `rebase`, `cherryPick`, `revert`, `stashSave`, `stashPop` |
+| history | three-way merge with a recursive merge base and rename detection (rename/modify, rename/rename, rename/delete and rename/add handled as git's `ort` does; no directory renames), fast-forwards, conflict markers and index stages; rebase; cherry-pick and revert; stash | `merge`, `abortMerge`, `rebase`, `cherryPick`, `revert`, `stashSave`, `stashPop` |
+| hooks | client-side hooks run where git runs them: `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`, `pre-merge-commit`, `post-merge`, `post-checkout`, `pre-rebase`, `pre-push`; `core.hooksPath`; `noVerify`; in-process hooks | `Repository.hooks`, `HookRunner`, `HookFailedException` |
 | more | describe, notes (read), mailmap, config reading and writing at system, global and local scope | `describe`, `noteFor`, `Mailmap`, `GitConfig`, `ConfigWriter` |
 | packs | pack writing with delta compression, indexing, repack, gc | `PackWriter`, `repack`, `gc` |
-| transfer | clone, fetch, push; smart HTTP(S), ssh, `git://` and local paths; protocol v0 and v2; shallow and partial clones; HTTP credentials; force and force-with-lease | `clone`, `fetch`, `push`, `Credentials`, `PushLease` |
+| transfer | clone, fetch, push, each over smart HTTP(S), ssh, `git://` and local paths; protocol v0 and v2; shallow and partial clones; HTTP credentials; force and force-with-lease | `clone`, `fetch`, `push`, `Credentials`, `PushLease` |
 | portable files | bundles, and tar or zip archives of any tree | `writeBundle`, `unbundle`, `writeArchive` |
+| signatures | signing and verifying commits and annotated tags in OpenPGP, X.509 and SSH formats, by running `gpg`, `gpgsm` or `ssh-keygen` as git does; `commit.gpgSign`, `tag.gpgSign`, `gpg.format`, `user.signingKey`, `gpg.minTrustLevel`, `gpg.ssh.allowedSignersFile`; a pluggable tool for in-process signing | `verifyCommit`, `verifyTag`, `commitIndex(sign:)`, `createTag(sign:)`, `SignatureTool`, `ProcessSignatureTool` |
 
 ## Using it
 
@@ -98,7 +100,9 @@ library runs against what the application supplies:
 
 zlib is pure Dart there, 64-bit reads avoid integers dart2js cannot hold, and
 there is no global git config or excludes file to read. ssh and `git://` need
-`dart:io` and are not available in a browser.
+`dart:io` and are not available in a browser. Nor are hook scripts: a browser
+runs no processes, so a repository there behaves as if it had no hooks unless
+the application supplies them as Dart callbacks with `HookRunner.inProcess`.
 
 ## Limits
 
@@ -107,9 +111,22 @@ there is no global git config or excludes file to read. ssh and `git://` need
 - **File modes on checkout.** Where the platform cannot set the executable bit or
   create a symlink, those paths come back in `CheckoutResult.degraded` rather
   than being silently wrong. Staging keeps a file's existing mode.
-- **Push** goes to local paths and HTTP(S), not ssh or `git://`.
+- **Push** goes over every transport, in protocol v0 only (as git's own client
+  does; v2 has no push). There are no atomic pushes, push options or ref
+  deletions, and a `git://` push needs a daemon started with
+  `--enable=receive-pack`.
+- **Filter drivers** run `filter.<driver>.clean` and `.smudge` commands through
+  `sh`; the long-running `filter.<driver>.process` protocol (`git lfs
+  filter-process`) is not supported, and neither is LFS's network protocol. In
+  a browser, commands cannot run: register an in-process `FilterDriver` instead.
 - Notes and submodules are read, not written. Rebase is not interactive. There
   are no credential helpers and no dumb HTTP transport.
+- **Signatures** are made and checked by external programs, as git does, so
+  the default `SignatureTool` needs `dart:io`; a browser app must supply its
+  own. `gpg.ssh.defaultKeyCommand` is not run — SSH signing needs
+  `user.signingKey` — and SHA-256-era `gpgsig-sha256` signatures are ignored.
+  Because the API is synchronous, a payload git would pipe to the program is
+  fed from a temporary file through `sh` or `cmd`.
 
 ## Verification
 

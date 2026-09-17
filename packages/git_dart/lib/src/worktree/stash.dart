@@ -100,6 +100,9 @@ ObjectId? stashSave(
     author: who,
     parents: [head],
     updateHead: false,
+    // Stash commits are bookkeeping, not history anyone vouches for: git
+    // never signs them, whatever `commit.gpgSign` says.
+    sign: false,
   );
 
   final parents = <ObjectId>[head, indexCommit];
@@ -111,7 +114,7 @@ ObjectId? stashSave(
     for (final path in untracked) {
       final file = fs.file(p.join(workTree, path.replaceAll('/', p.separator)));
       if (!file.existsSync()) continue;
-      final blob = Blob(file.readAsBytesSync());
+      final blob = Blob(repository.convertToGit(path, file.readAsBytesSync()));
       repository.objects.write(blob);
       flat[path] = TreeEntry.named(
         mode: FileMode.regularFile,
@@ -127,6 +130,7 @@ ObjectId? stashSave(
         author: who,
         parents: const [],
         updateHead: false,
+        sign: false,
       ));
     }
   }
@@ -139,6 +143,7 @@ ObjectId? stashSave(
     author: who,
     parents: parents,
     updateHead: false,
+    sign: false,
   );
 
   // The reflog is the stack, so the ref must be logged even though it is not
@@ -306,7 +311,11 @@ ObjectId _treeOfWorkingState(Repository repository, String workTree) {
         fs.file(p.join(workTree, entry.path.replaceAll('/', p.separator)));
 
     if (!file.existsSync()) continue; // deleted: left out of the tree
-    final blob = Blob(file.readAsBytesSync());
+    // Stored as `git add` would store it, or the stash records a change
+    // nobody made and applying it writes the unfiltered bytes back.
+    final blob = Blob(
+      repository.convertToGit(entry.path, file.readAsBytesSync()),
+    );
     repository.objects.write(blob);
     flat[entry.path] = TreeEntry.named(
       mode: entry.fileMode,
@@ -394,7 +403,10 @@ void _restoreUntracked(
           fs.file(p.join(workTree, path.replaceAll('/', p.separator)))
             ..parent.createSync(recursive: true);
       file.writeAsBytesSync(
-        repository.objects.readTyped<Blob>(entry.id).content,
+        repository.convertToWorkTree(
+          path,
+          repository.objects.readTyped<Blob>(entry.id).content,
+        ),
       );
     }
   }

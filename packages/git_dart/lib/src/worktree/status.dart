@@ -7,7 +7,6 @@ import '../index/git_index.dart';
 import '../objects/git_object.dart';
 import '../objects/tree.dart';
 import '../repository.dart';
-import 'attributes.dart';
 import 'ignore.dart';
 
 /// One path's state, on both sides of the index.
@@ -190,10 +189,7 @@ RepositoryStatus statusOf(
     // against an index that holds the LF form — which is the whole repository
     // permanently dirty and no change made.
     final raw = file.readAsBytesSync();
-    final id = hashObject(
-      ObjectKind.blob,
-      toStorage(raw, repo.attributes.conversionFor(entry.path, raw)),
-    );
+    final id = hashObject(ObjectKind.blob, repo.convertToGit(entry.path, raw));
     if (id != entry.id) unstaged[entry.path] = ChangeKind.modified;
   }
 

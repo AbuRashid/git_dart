@@ -175,6 +175,9 @@ void restorePath(
   }
   file.parent.createSync(recursive: true);
   file.writeAsBytesSync(
-    repository.objects.readTyped<Blob>(entry.id).content,
+    repository.convertToWorkTree(
+      path,
+      repository.objects.readTyped<Blob>(entry.id).content,
+    ),
   );
 }

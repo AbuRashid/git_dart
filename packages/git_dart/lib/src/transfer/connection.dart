@@ -134,17 +134,30 @@ class SshTarget {
 
 /// Opens whichever connection [url] calls for, or null when it names a
 /// transport that is not one of these.
+///
+/// [requestVersion2] is for fetches. A push turns it off, as git's own client
+/// does: `git-receive-pack` has no version 2, so there is nothing to ask for.
 Future<PacketConnection?> connectTo(
   String url,
   String service, {
   String sshCommand = 'ssh',
+  bool requestVersion2 = true,
 }) async {
   if (url.startsWith('git://')) {
-    return DaemonConnection.open(Uri.parse(url), service);
+    return DaemonConnection.open(
+      Uri.parse(url),
+      service,
+      requestVersion2: requestVersion2,
+    );
   }
   final ssh = SshTarget.parse(url);
   if (ssh != null) {
-    return SshConnection.open(ssh, service, sshCommand: sshCommand);
+    return SshConnection.open(
+      ssh,
+      service,
+      sshCommand: sshCommand,
+      requestVersion2: requestVersion2,
+    );
   }
   return null;
 }

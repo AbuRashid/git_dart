@@ -8,7 +8,6 @@ import '../object_id.dart';
 import '../objects/git_object.dart';
 import '../objects/tree.dart';
 import '../repository.dart';
-import 'attributes.dart';
 import 'sparse_checkout.dart';
 import 'status.dart';
 import '../platform/host.dart';
@@ -163,7 +162,7 @@ bool _writeEntry(
   // whatever this system uses.
   final content = mode == FileMode.symlink
       ? stored
-      : toWorkingTree(stored, repo.attributes.conversionFor(path, stored));
+      : repo.convertToWorkTree(path, stored);
   fs.directory(p.dirname(absolute)).createSync(recursive: true);
 
   final existingLink = fs.link(absolute);

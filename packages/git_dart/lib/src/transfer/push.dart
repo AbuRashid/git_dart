@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import '../hooks/hook_steps.dart';
+import '../hooks/hooks.dart';
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/git_object.dart';
@@ -10,9 +12,10 @@ import '../objects/tree.dart';
 import '../remote/remote.dart';
 import '../repository.dart';
 import '../storage/pack_writer.dart';
+import '../platform/http.dart';
+import 'connection.dart';
 import 'credentials.dart';
 import 'pkt_line.dart';
-import '../platform/http.dart';
 
 /// What happened to one ref.
 class PushStatus {
@@ -100,6 +103,22 @@ class PushLease {
 /// remote still holds what the caller last saw. [force] is the unsafe way, and
 /// wins over a lease when both are given — a caller that asked for both has
 /// asked for the stronger thing.
+///
+/// Three transports: a directory on this machine, smart HTTP(S), and the two
+/// duplex ones — ssh and the git daemon — which are one open connection to
+/// `git-receive-pack` rather than a request and a response. Everything above
+/// the transport is shared: the same fast-forward check, the same commands,
+/// the same pack, the same report. [credentials] only means something to
+/// HTTP; ssh authenticates itself, through [sshCommand], exactly as a fetch
+/// does, and the daemon does not authenticate at all.
+///
+/// Once the remote's refs are known and before anything is sent, the
+/// `pre-push` hook runs with the remote's name and URL, and a line on its
+/// input for each ref about to be updated:
+/// `<local ref> <local sha> <remote ref> <remote sha>`, the remote's being
+/// zeros for a new branch. A ref already up to date or refused here is not
+/// listed, as in git. If the hook fails, [HookFailedException] is thrown and
+/// the remote is untouched; [noVerify] skips the hook.
 Future<PushResult> push(
   Repository repository,
   Remote remote, {
@@ -108,6 +127,8 @@ Future<PushResult> push(
   PushLease? lease,
   Credentials? credentials,
   void Function(String message)? onProgress,
+  String sshCommand = 'ssh',
+  bool noVerify = false,
 }) async {
   final names = branches ??
       [
@@ -129,16 +150,64 @@ Future<PushResult> push(
       ? null
       : _heldValues(repository, remote, wanted.keys, lease);
 
+  Future<void> prePush(Map<String, ({ObjectId? from, ObjectId to})> updates) {
+    if (noVerify) return Future.value();
+    return _runPrePush(repository, remote, updates);
+  }
+
   if (remote.isLocal) {
-    return _pushLocal(repository, remote, wanted, force, held, onProgress);
+    return _pushLocal(
+        repository, remote, wanted, force, held, onProgress, prePush);
   }
-  if (remote.url.startsWith('http://') || remote.url.startsWith('https://')) {
-    return _pushHttp(
-        repository, remote, wanted, force, held, credentials, onProgress);
+  final url = remote.pushUrl;
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return _pushHttp(repository, remote, wanted, force, held, credentials,
+        onProgress, prePush);
   }
+
+  // Git never asks receive-pack for protocol version 2: v2 has no push
+  // command, and git's own client downgrades a push to v0 before it connects
+  // (`connect.c`). Asking anyway would only invite a server to answer in a
+  // dialect that cannot carry what is about to be sent.
+  final connection = await connectTo(
+    url,
+    'git-receive-pack',
+    sshCommand: sshCommand,
+    requestVersion2: false,
+  );
+  if (connection != null) {
+    return _pushOverConnection(repository, remote, connection, wanted, force,
+        held, onProgress, prePush);
+  }
+
   throw UnsupportedError(
-    'this build can push to a local path or over http(s); '
-    '${remote.url} is neither',
+    'no transport for $url: this build pushes to a local path, http(s), '
+    'ssh and git://',
+  );
+}
+
+typedef _PrePush = Future<void> Function(
+    Map<String, ({ObjectId? from, ObjectId to})> updates);
+
+/// Runs `pre-push` over [updates], throwing when it refuses.
+///
+/// The local and remote ref are the same name because this library only
+/// pushes a branch to the branch of the same name.
+Future<void> _runPrePush(
+  Repository repository,
+  Remote remote,
+  Map<String, ({ObjectId? from, ObjectId to})> updates,
+) async {
+  final input = StringBuffer();
+  updates.forEach((ref, update) {
+    input.write('$ref ${update.to.hex} $ref '
+        '${(update.from ?? ObjectId.zero).hex}\n');
+  });
+  await runHookAsync(
+    repository,
+    'pre-push',
+    arguments: [remote.name, remote.pushUrl],
+    stdin: input.toString(),
   );
 }
 
@@ -293,6 +362,7 @@ Future<PushResult> _pushLocal(
   bool force,
   Map<String, ObjectId?>? held,
   void Function(String)? onProgress,
+  _PrePush prePush,
 ) async {
   final target = Repository.discover(remote.localPath);
   if (target == null) {
@@ -344,6 +414,11 @@ Future<PushResult> _pushLocal(
       accepted[entry.key] = entry.value;
     }
 
+    await prePush({
+      for (final entry in accepted.entries)
+        entry.key: (from: theirs[entry.key], to: entry.value),
+    });
+
     var sent = 0;
     if (accepted.isNotEmpty) {
       final send = _objectsToSend(
@@ -388,6 +463,155 @@ Future<PushResult> _pushLocal(
 }
 
 // ---------------------------------------------------------------------------
+// what every wire transport shares
+// ---------------------------------------------------------------------------
+
+/// One line of a push request: move [ref] from [from] to [to].
+typedef _Command = ({String ref, ObjectId? from, ObjectId to});
+
+/// What `pre-push` is told about a plan: the refs about to move.
+Map<String, ({ObjectId? from, ObjectId to})> _hookUpdates(
+        List<_Command> commands) =>
+    {
+      for (final command in commands)
+        command.ref: (from: command.from, to: command.to),
+    };
+
+/// What the push will ask for, and what it already knows will be refused.
+///
+/// Decided entirely from the advertisement, before a byte of the pack is
+/// built. A ref refused here is never offered to the server at all, which is
+/// both cheaper and safer than relying on the server to refuse it: a server
+/// with `receive.denyNonFastForwards` unset would take it.
+({List<PushStatus> statuses, List<_Command> commands}) _plan(
+  Repository repository,
+  Map<String, ObjectId> wanted,
+  Map<String, ObjectId> theirs,
+  bool force,
+  Map<String, ObjectId?>? held,
+) {
+  final statuses = <PushStatus>[];
+  final commands = <_Command>[];
+
+  for (final entry in wanted.entries) {
+    final before = theirs[entry.key];
+    if (before == entry.value) continue; // already there
+    if (before != null &&
+        !force &&
+        !_contains(repository, entry.value, before)) {
+      final refusal = _leaseRefusal(held, entry.key, before);
+      if (refusal != null) {
+        statuses.add(PushStatus(
+          ref: entry.key,
+          to: entry.value,
+          from: before,
+          rejected: refusal,
+        ));
+        continue;
+      }
+    }
+    commands.add((ref: entry.key, from: before, to: entry.value));
+  }
+  return (statuses: statuses, commands: commands);
+}
+
+/// The packfile for [commands]: everything their new tips reach that the
+/// server did not advertise.
+PackWriter _packFor(
+  Repository repository,
+  List<_Command> commands,
+  Map<String, ObjectId> theirs,
+) {
+  final send = _objectsToSend(
+    repository,
+    [for (final command in commands) command.to],
+    theirs.values,
+  );
+
+  final writer = PackWriter();
+  final names = _namesWithin(repository, send);
+  for (final id in send) {
+    final raw = repository.objects.readRaw(id);
+    if (raw == null) continue;
+    // Named where the name is known, so revisions of one file sit together
+    // and the packer has plausible delta bases to try.
+    writer.add(id, raw.kind, raw.content, name: names[id]);
+  }
+  return writer;
+}
+
+/// The capabilities this client asks for, out of what the server offered.
+///
+/// `report-status-v2` is preferred when offered, as git prefers it: its `ok`
+/// and `ng` lines are the ones version 1 sends, and the `option` lines it adds
+/// — which a server running a `proc-receive` hook uses to say a ref landed
+/// somewhere other than where it was sent — are read past rather than
+/// misread. Side-band is asked for only where the reply can be demultiplexed
+/// as it arrives, which is the duplex transports.
+List<String> _agree(Set<String> offered, {required bool sideBand}) => [
+      if (offered.contains('report-status-v2'))
+        'report-status-v2'
+      else if (offered.contains('report-status'))
+        'report-status',
+      if (sideBand && offered.contains('side-band-64k')) 'side-band-64k',
+      'agent=git/git_dart-0.1',
+    ];
+
+/// The command section of a push request, flush included.
+///
+/// The capabilities ride on the first command after a NUL, the same trick the
+/// advertisement uses. The pack follows directly after the flush, unframed.
+Uint8List _commandSection(List<_Command> commands, List<String> agreed) {
+  final body = BytesBuilder();
+  for (var i = 0; i < commands.length; i++) {
+    final command = commands[i];
+    final line = '${(command.from ?? ObjectId.zero).hex} '
+        '${command.to.hex} ${command.ref}';
+    body.add(
+      PktLine.text(i == 0 ? '$line\x00${agreed.join(' ')}\n' : '$line\n')
+          .encode(),
+    );
+  }
+  body.add(PktLine.flush.encode());
+  return body.takeBytes();
+}
+
+/// Turns the server's report into the result, and moves the tracking refs of
+/// whatever landed.
+PushResult _conclude(
+  Repository repository,
+  Remote remote,
+  List<_Command> commands,
+  List<PushStatus> statuses,
+  _Report report,
+  int objectsSent,
+) {
+  if (report.unpackError != null) {
+    throw StateError('the server could not unpack what was sent: '
+        '${report.unpackError}');
+  }
+
+  final landed = <String, ObjectId>{};
+  for (final command in commands) {
+    final refused = report.refusals[command.ref];
+    if (refused == null) landed[command.ref] = command.to;
+    statuses.add(PushStatus(
+      ref: command.ref,
+      to: command.to,
+      from: command.from,
+      rejected: refused,
+      // A rewind is a rewind whether force or a lease allowed it.
+      forced: command.from != null &&
+          !_contains(repository, command.to, command.from!),
+    ));
+  }
+  _updateTrackingRefs(repository, remote, landed);
+
+  statuses.sort((a, b) => a.ref.compareTo(b.ref));
+  return PushResult(statuses: statuses, objectsSent: objectsSent);
+}
+
+// ---------------------------------------------------------------------------
 // smart HTTP
 // ---------------------------------------------------------------------------
 
@@ -399,6 +623,7 @@ Future<PushResult> _pushHttp(
   Map<String, ObjectId?>? held,
   Credentials? given,
   void Function(String)? onProgress,
+  _PrePush prePush,
 ) async {
   // A `user@host` URL carries the name but not the secret, and HttpClient
   // ignores both, so they are taken out here and sent as a header instead.
@@ -445,72 +670,22 @@ Future<PushResult> _pushHttp(
 
     final advertisement = _readAdvertisement(await _collect(adResponse.body));
     final theirs = advertisement.refs;
-    final capabilities = advertisement.capabilities;
 
-    // ---- what may be sent ----
-    final statuses = <PushStatus>[];
-    final commands = <({String ref, ObjectId? from, ObjectId to})>[];
-
-    for (final entry in wanted.entries) {
-      final before = theirs[entry.key];
-      if (before == entry.value) continue; // already there
-      if (before != null &&
-          !force &&
-          !_contains(repository, entry.value, before)) {
-        final refusal = _leaseRefusal(held, entry.key, before);
-        if (refusal != null) {
-          statuses.add(PushStatus(
-            ref: entry.key,
-            to: entry.value,
-            from: before,
-            rejected: refusal,
-          ));
-          continue;
-        }
-      }
-      commands.add((ref: entry.key, from: before, to: entry.value));
+    final plan = _plan(repository, wanted, theirs, force, held);
+    await prePush(_hookUpdates(plan.commands));
+    if (plan.commands.isEmpty) {
+      return PushResult(statuses: plan.statuses);
     }
 
-    if (commands.isEmpty) {
-      return PushResult(statuses: statuses);
-    }
-
-    // ---- the pack ----
-    final send = _objectsToSend(
-      repository,
-      [for (final command in commands) command.to],
-      theirs.values,
-    );
-
-    final writer = PackWriter();
-    final names = _namesWithin(repository, send);
-    for (final id in send) {
-      final raw = repository.objects.readRaw(id);
-      if (raw == null) continue;
-      // Named where the name is known, so revisions of one file sit together
-      // and the packer has plausible delta bases to try.
-      writer.add(id, raw.kind, raw.content, name: names[id]);
-    }
+    final writer = _packFor(repository, plan.commands, theirs);
     onProgress?.call('sending ${writer.length} objects');
 
-    final agreed = <String>[
-      if (capabilities.contains('report-status')) 'report-status',
-      'agent=git/git_dart-0.1',
-    ];
-
-    final body = BytesBuilder();
-    for (var i = 0; i < commands.length; i++) {
-      final command = commands[i];
-      final line = '${(command.from ?? ObjectId.zero).hex} '
-          '${command.to.hex} ${command.ref}';
-      body.add(
-        PktLine.text(i == 0 ? '$line\x00${agreed.join(' ')}\n' : '$line\n')
-            .encode(),
-      );
-    }
-    body.add(PktLine.flush.encode());
-    // The pack follows the commands directly, unframed.
-    body.add(writer.build());
+    // No side-band over HTTP: the whole reply arrives as one body after the
+    // server has finished, so there is no progress to show while it works.
+    final agreed = _agree(advertisement.capabilities, sideBand: false);
+    final body = BytesBuilder()
+      ..add(_commandSection(plan.commands, agreed))
+      ..add(writer.build());
 
     final pushUrl = Uri.parse('$base/git-receive-pack');
     final response = await client.send(
@@ -537,34 +712,109 @@ Future<PushResult> _pushHttp(
       );
     }
 
-    final report = _readReport(await _collect(response.body));
-    if (report.unpackError != null) {
-      throw StateError('the server could not unpack what was sent: '
-          '${report.unpackError}');
-    }
-
-    final landed = <String, ObjectId>{};
-    for (final command in commands) {
-      final refused = report.refusals[command.ref];
-      if (refused == null) landed[command.ref] = command.to;
-      statuses.add(PushStatus(
-        ref: command.ref,
-        to: command.to,
-        from: command.from,
-        rejected: refused,
-        // A rewind is a rewind whether force or a lease allowed it.
-        forced: command.from != null &&
-            !_contains(repository, command.to, command.from!),
-      ));
-    }
-    _updateTrackingRefs(repository, remote, landed);
-
-    statuses.sort((a, b) => a.ref.compareTo(b.ref));
-    return PushResult(statuses: statuses, objectsSent: writer.length);
+    final reader = PktLineReader(await _collect(response.body));
+    final report = await _readReport(
+      () async => reader.next(),
+      sideBand: false,
+      onProgress: onProgress,
+    );
+    return _conclude(repository, remote, plan.commands, plan.statuses, report,
+        writer.length);
   } finally {
     client.close();
   }
 }
+
+// ---------------------------------------------------------------------------
+// ssh and the git daemon
+// ---------------------------------------------------------------------------
+
+/// A push over one open connection to `git-receive-pack`.
+///
+/// The same exchange as HTTP with the seams removed: the advertisement, then
+/// the commands and the pack, then the report, all on one stream. What the
+/// duplex shape adds is that the report can arrive while the server is still
+/// working, so side-band is worth asking for — the server's progress, and the
+/// output of its hooks, come back on band 2 as they happen.
+Future<PushResult> _pushOverConnection(
+  Repository repository,
+  Remote remote,
+  PacketConnection connection,
+  Map<String, ObjectId> wanted,
+  bool force,
+  Map<String, ObjectId?>? held,
+  void Function(String)? onProgress,
+  _PrePush prePush,
+) async {
+  try {
+    onProgress?.call('contacting ${remote.pushUrl}');
+
+    // ---- what the server opened with ----
+    final rejoined = BytesBuilder();
+    var said = false;
+    while (true) {
+      final packet = await connection.receive();
+      if (packet == null || packet.kind != PktKind.data) break;
+      said = true;
+      rejoined.add(packet.encode());
+    }
+    if (!said) {
+      throw StateError(
+        'the server said nothing. '
+        '${connection is SshConnection && connection.diagnostics.isNotEmpty ? connection.diagnostics : 'It may not have a repository at that path, or — for a git '
+            'daemon — may not have been started with '
+            '--enable=receive-pack.'}',
+      );
+    }
+    rejoined.add(PktLine.flush.encode());
+
+    final advertisement = _readAdvertisement(rejoined.takeBytes());
+    final theirs = advertisement.refs;
+
+    final plan = _plan(repository, wanted, theirs, force, held);
+    // Before anything is sent. A refusing hook still has to close the
+    // conversation politely, which the flush below does.
+    try {
+      await prePush(_hookUpdates(plan.commands));
+    } on Object {
+      connection.send(PktLine.flush.encode());
+      await connection.flush();
+      rethrow;
+    }
+    if (plan.commands.isEmpty) {
+      // A flush with no commands is how a client says it has nothing to
+      // push; receive-pack then exits without waiting for a pack.
+      connection.send(PktLine.flush.encode());
+      await connection.flush();
+      return PushResult(statuses: plan.statuses);
+    }
+
+    final writer = _packFor(repository, plan.commands, theirs);
+    onProgress?.call('sending ${writer.length} objects');
+
+    final agreed = _agree(advertisement.capabilities, sideBand: true);
+    connection
+      ..send(_commandSection(plan.commands, agreed))
+      ..send(writer.build());
+    // Flushed before the report is read: the server is waiting for the end of
+    // the pack, and bytes still in a local buffer are a deadlock.
+    await connection.flush();
+
+    final report = await _readReport(
+      connection.receive,
+      sideBand: agreed.contains('side-band-64k'),
+      onProgress: onProgress,
+    );
+    return _conclude(repository, remote, plan.commands, plan.statuses, report,
+        writer.length);
+  } finally {
+    await connection.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// reading what the server says
+// ---------------------------------------------------------------------------
 
 /// Moves this repository's copy of the remote's branches to what was just
 /// pushed.
@@ -607,6 +857,21 @@ Future<Uint8List> _collect(Stream<List<int>> stream) async {
     if (packet.kind != PktKind.data) continue;
     if (packet.text.startsWith('#')) continue;
 
+    // A server asked for version 1 says so before its refs, and otherwise
+    // speaks version 0; the line is a preamble, not a ref.
+    final text = packet.text.trimRight();
+    if (text == 'version 1') continue;
+    // Version 2 has no push, so a server that answers in it anyway cannot be
+    // pushed to over this conversation. git's receive-pack falls back to
+    // version 0 by itself, so this is some other server — said plainly
+    // rather than left to fail parsing capability lines as refs.
+    if (text == 'version 2') {
+      throw UnsupportedError(
+        'the server answered a push in protocol version 2, which has no push '
+        'command',
+      );
+    }
+
     final line = parseAdvertisement(packet);
     if (first) {
       capabilities.addAll(line.capabilities);
@@ -620,33 +885,76 @@ Future<Uint8List> _collect(Stream<List<int>> stream) async {
   return (refs: refs, capabilities: capabilities);
 }
 
-/// `unpack ok`, then `ok <ref>` or `ng <ref> <why>` for each command.
-({String? unpackError, Map<String, String> refusals}) _readReport(
-  Uint8List bytes,
-) {
-  final reader = PktLineReader(bytes);
+typedef _Report = ({String? unpackError, Map<String, String> refusals});
+
+/// `unpack ok`, then `ok <ref>` or `ng <ref> <why>` for each command, up to a
+/// flush.
+///
+/// With side-band agreed the report is not the packets themselves: it is a
+/// pkt-line stream of its own, cut into pieces and carried inside band 1, with
+/// band 2 for progress and band 3 for a fatal error. The pieces are rejoined
+/// and read once the outer flush arrives. Without side-band the packets are
+/// the report — and are never mistaken for band-tagged ones, since a report
+/// line starts with a letter.
+///
+/// `report-status-v2` adds `option …` lines after an `ok`; nothing here needs
+/// them, so they are passed over.
+Future<_Report> _readReport(
+  Future<PktLine?> Function() next, {
+  required bool sideBand,
+  void Function(String)? onProgress,
+}) async {
+  final lines = <PktLine>[];
+
+  if (sideBand) {
+    final band1 = BytesBuilder();
+    final progress = StringBuffer();
+    while (true) {
+      final packet = await next();
+      if (packet == null || packet.kind != PktKind.data) break;
+      if (packet.payload.isEmpty) continue;
+      final rest = Uint8List.sublistView(packet.payload, 1);
+      switch (packet.payload.first) {
+        case 1:
+          band1.add(rest);
+        case 2:
+          // Progress arrives in fragments and uses `\r` to redraw a line;
+          // each finished line or redraw is reported once.
+          progress.write(utf8.decode(rest, allowMalformed: true));
+          final text = progress.toString();
+          final cut = text.lastIndexOf(RegExp('[\r\n]'));
+          if (cut >= 0) {
+            for (final message
+                in text.substring(0, cut).split(RegExp('[\r\n]'))) {
+              if (message.trim().isNotEmpty) onProgress?.call(message.trim());
+            }
+            progress
+              ..clear()
+              ..write(text.substring(cut + 1));
+          }
+        case 3:
+          throw StateError('the server gave up: '
+              '${utf8.decode(rest, allowMalformed: true).trim()}');
+      }
+    }
+    final inner = PktLineReader(band1.takeBytes());
+    while (true) {
+      final packet = inner.next();
+      if (packet == null || packet.kind != PktKind.data) break;
+      lines.add(packet);
+    }
+  } else {
+    while (true) {
+      final packet = await next();
+      if (packet == null || packet.kind != PktKind.data) break;
+      lines.add(packet);
+    }
+  }
+
   final refusals = <String, String>{};
   String? unpackError;
-
-  while (true) {
-    final packet = reader.next();
-    if (packet == null) break;
-    if (packet.kind != PktKind.data) continue;
-
-    var text = packet.text;
-    // A server that agreed side-band puts the report on band 1.
-    if (packet.payload.isNotEmpty && packet.payload.first <= 3) {
-      final band = packet.payload.first;
-      final rest = utf8.decode(
-        Uint8List.sublistView(packet.payload, 1),
-        allowMalformed: true,
-      );
-      if (band == 3) return (unpackError: rest.trim(), refusals: refusals);
-      if (band == 2) continue;
-      text = rest;
-    }
-
-    for (final line in const LineSplitter().convert(text)) {
+  for (final packet in lines) {
+    for (final line in const LineSplitter().convert(packet.text)) {
       if (line.startsWith('unpack ')) {
         final status = line.substring(7).trim();
         if (status != 'ok') unpackError = status;
