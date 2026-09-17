@@ -4,6 +4,8 @@ import 'package:path/path.dart' as p;
 import '../config/git_config.dart';
 import '../fs/git_fs.dart';
 import '../object_id.dart';
+import '../refs/ref_store.dart';
+import '../refs/reflog.dart';
 
 /// A rule mapping refs on one side to refs on the other.
 ///
@@ -212,12 +214,100 @@ class RemoteStore {
     if (tracking.existsSync()) tracking.deleteSync(recursive: true);
   }
 
+  /// Renames a remote, as `git remote rename` does.
+  ///
+  /// More than a new section header: the fetch refspecs name the tracking
+  /// refs by the remote's name, the tracking refs themselves live under it,
+  /// and every branch that follows the remote says so by name. Removing the
+  /// remote and adding it again would lose all three — and with the tracking
+  /// refs gone the repository reads as never having fetched.
   void rename(String from, String to) {
-    final remote = named(from);
-    if (remote == null) throw StateError('no remote named $from');
+    if (named(from) == null) throw StateError('no remote named $from');
+    if (from == to) return;
     _validateName(to);
-    remove(from);
-    add(to, remote.url);
+    if (named(to) != null) {
+      throw StateError('a remote named $to already exists');
+    }
+
+    final oldPrefix = 'refs/remotes/$from/';
+    final newPrefix = 'refs/remotes/$to/';
+
+    final file = fs.file(_configPath);
+    final out = <String>[];
+    var section = '';
+    for (final line in file.readAsLinesSync()) {
+      final trimmed = line.trim();
+      if (trimmed.startsWith('[')) {
+        section = _sectionKey(trimmed);
+        if (section == '[remote"$from"]') {
+          out.add(line.replaceFirst('"$from"', '"$to"'));
+          continue;
+        }
+        out.add(line);
+        continue;
+      }
+      final equals = trimmed.indexOf('=');
+      final key =
+          equals < 0 ? '' : trimmed.substring(0, equals).trim().toLowerCase();
+      final value = equals < 0 ? '' : trimmed.substring(equals + 1).trim();
+
+      if (section == '[remote"$from"]') {
+        // The section this header opened, now under the new name; its
+        // refspecs still name the old one.
+        if (key == 'fetch' && value.contains(oldPrefix)) {
+          out.add(line.replaceAll(oldPrefix, newPrefix));
+          continue;
+        }
+      } else if (section.startsWith('[branch"') &&
+          (key == 'remote' || key == 'pushremote') &&
+          value == from) {
+        final indent = line.substring(0, line.length - line.trimLeft().length);
+        out.add('$indent${trimmed.substring(0, equals).trim()} = $to');
+        continue;
+      }
+      out.add(line);
+    }
+    file.writeAsStringSync('${out.join('\n')}\n');
+
+    // The tracking refs move with their logs. Direct refs first, so that a
+    // symbolic one (`<remote>/HEAD`) has something to point at.
+    final refs = RefStore(gitDirectory);
+    final tracking = refs.list(prefix: oldPrefix)
+      ..sort((a, b) => (a.target is SymbolicRef ? 1 : 0)
+          .compareTo(b.target is SymbolicRef ? 1 : 0));
+    for (final ref in tracking) {
+      final renamed = '$newPrefix${ref.path.substring(oldPrefix.length)}';
+      final log = fs.file(Reflog.pathOf(gitDirectory, ref.path));
+      final carried = log.existsSync() ? log.readAsStringSync() : null;
+
+      switch (ref.target) {
+        case DirectRef(:final id):
+          refs.write(renamed, id);
+        case SymbolicRef(:final path):
+          refs.writeSymbolic(
+            renamed,
+            path.startsWith(oldPrefix)
+                ? '$newPrefix${path.substring(oldPrefix.length)}'
+                : path,
+          );
+      }
+      refs.delete(ref.path);
+      if (carried != null) {
+        fs.file(Reflog.pathOf(gitDirectory, renamed))
+          ..parent.createSync(recursive: true)
+          ..writeAsStringSync(carried);
+      }
+    }
+  }
+
+  /// A section header with the section name folded and the spaces dropped,
+  /// leaving the subsection as written: git compares subsections exactly.
+  static String _sectionKey(String header) {
+    final quote = header.indexOf('"');
+    final compact = header.replaceAll(' ', '');
+    if (quote < 0) return compact.toLowerCase();
+    final at = compact.indexOf('"');
+    return '${compact.substring(0, at).toLowerCase()}${compact.substring(at)}';
   }
 
   static void _validateName(String name) {

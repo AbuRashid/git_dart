@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+- `RemoteStore.rename` now does what `git remote rename` does: the tracking
+  refs (loose and packed) and their reflogs move to the new name, the fetch
+  refspecs are rewritten, `pushurl` and other settings are kept, and branches
+  whose `remote` or `pushRemote` named the old remote follow it. It previously
+  removed the remote and added it back, which dropped all of these. Renaming
+  onto an existing remote is refused.
+- `Repository.setUpstream` writes into an existing `[branch "<name>"]` section
+  instead of appending another one, so setting it twice no longer leaves two
+  `branch.<name>.merge` values. It refuses a branch that does not exist.
+- New `Repository.unsetUpstream`, as `git branch --unset-upstream`.
+
 ## 0.2.0
 
 - `push` works over ssh and `git://` as well as local paths and HTTP(S),

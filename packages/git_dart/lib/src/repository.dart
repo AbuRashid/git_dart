@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
+import 'config/config_writer.dart';
 import 'config/git_config.dart';
 import 'diff/text_diff.dart';
 import 'diff/tree_diff.dart';
@@ -1253,16 +1254,25 @@ class Repository {
   }
 
   /// Records that [branch] follows [ref] on [remote], as `--set-upstream` does.
+  ///
+  /// Written into an existing `[branch "<branch>"]` section when there is one.
+  /// Appending a second section instead gives `branch.<branch>.merge` two
+  /// values, which git reads as a request to merge both.
   void setUpstream(String branch, String remote, String ref) {
-    final file = fs.file(p.join(commonDirectory, 'config'));
-    final existing = file.existsSync() ? file.readAsStringSync() : '';
-    final separator = existing.isEmpty || existing.endsWith('\n') ? '' : '\n';
-    file.writeAsStringSync(
-      '$existing$separator'
-      '[branch "$branch"]\n'
-      '\tremote = $remote\n'
-      '\tmerge = $ref\n',
-    );
+    if (refs.read('refs/heads/$branch') == null) {
+      throw StateError('no branch named $branch');
+    }
+    final writer = ConfigWriter(commonDirectory);
+    writer.set('branch.$branch.remote', remote, ConfigScope.local);
+    writer.set('branch.$branch.merge', ref, ConfigScope.local);
+    reloadConfig();
+  }
+
+  /// Forgets what [branch] follows, as `--unset-upstream` does.
+  void unsetUpstream(String branch) {
+    final writer = ConfigWriter(commonDirectory);
+    writer.unset('branch.$branch.remote', ConfigScope.local);
+    writer.unset('branch.$branch.merge', ConfigScope.local);
     reloadConfig();
   }
 

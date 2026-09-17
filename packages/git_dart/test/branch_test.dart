@@ -179,4 +179,101 @@ void main() {
     expect(branches(), ['main']);
     expect(git(['fsck', '--no-progress']), isNotNull);
   });
+
+  group('upstream', () {
+    test('setting it twice leaves one value, as git config would', () {
+      git(['remote', 'add', 'origin', 'https://example.invalid/x.git']);
+      final repo = Repository.open(repoPath);
+      repo.setUpstream('main', 'origin', 'refs/heads/main');
+      repo.setUpstream('main', 'origin', 'refs/heads/trunk');
+      repo.close();
+
+      // Two values for branch.main.merge would make `git pull` merge both.
+      expect(
+        git(['config', '--get-all', 'branch.main.merge']).trim(),
+        'refs/heads/trunk',
+      );
+      expect(git(['config', '--get', 'branch.main.remote']).trim(), 'origin');
+    });
+
+    test('unsetting it removes both keys', () {
+      git(['branch', '--set-upstream-to=main', 'feature']);
+      final repo = Repository.open(repoPath);
+      expect(repo.trackingFor('feature').upstreamRef, isNotNull);
+      repo.unsetUpstream('feature');
+      expect(repo.trackingFor('feature').upstreamRef, isNull);
+      repo.close();
+
+      final result = Process.runSync(
+        'git',
+        ['config', '--get', 'branch.feature.merge'],
+        workingDirectory: repoPath,
+      );
+      expect(result.exitCode, 1);
+    });
+
+    test('a branch that does not exist is refused', () {
+      final repo = Repository.open(repoPath);
+      expect(
+        () => repo.setUpstream('nope', 'origin', 'refs/heads/main'),
+        throwsStateError,
+      );
+      repo.close();
+    });
+  });
+
+  group('renaming a remote', () {
+    late String originPath;
+
+    setUp(() {
+      originPath = p.join(scratch.path, 'origin');
+      git(['clone', '-q', repoPath, originPath], cwd: scratch.path);
+      git(['remote', 'add', 'origin', originPath]);
+      git(['config', 'remote.origin.pushurl', originPath]);
+      git(['fetch', '-q', 'origin']);
+      git(['remote', 'set-head', 'origin', 'main']);
+      git(['branch', '--set-upstream-to=origin/main', 'main']);
+      // One of the tracking refs lives only in packed-refs.
+      git(['pack-refs', '--all']);
+    });
+
+    test('keeps the tracking refs, the refspec and the branches that follow it',
+        () {
+      final tip = git(['rev-parse', 'refs/remotes/origin/main']).trim();
+
+      final repo = Repository.open(repoPath);
+      repo.remotes.rename('origin', 'upstream');
+      repo.close();
+
+      expect(git(['remote']).trim(), 'upstream');
+      expect(git(['rev-parse', 'refs/remotes/upstream/main']).trim(), tip);
+      expect(
+        git(['symbolic-ref', 'refs/remotes/upstream/HEAD']).trim(),
+        'refs/remotes/upstream/main',
+      );
+      expect(
+        git(['for-each-ref', '--format=%(refname)', 'refs/remotes/origin/'])
+            .trim(),
+        isEmpty,
+      );
+      expect(
+        git(['config', '--get-all', 'remote.upstream.fetch']).trim(),
+        '+refs/heads/*:refs/remotes/upstream/*',
+      );
+      expect(git(['config', 'remote.upstream.pushurl']).trim(), originPath);
+      expect(git(['config', 'branch.main.remote']).trim(), 'upstream');
+      expect(
+        git(['rev-parse', '--abbrev-ref', 'main@{upstream}']).trim(),
+        'upstream/main',
+      );
+    });
+
+    test('onto a name already taken is refused and changes nothing', () {
+      git(['remote', 'add', 'other', originPath]);
+      final repo = Repository.open(repoPath);
+      expect(() => repo.remotes.rename('origin', 'other'), throwsStateError);
+      repo.close();
+      expect(git(['config', 'branch.main.remote']).trim(), 'origin');
+    });
+  });
 }
