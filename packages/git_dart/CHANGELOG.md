@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - `push` works over ssh and `git://` as well as local paths and HTTP(S),
   taking an `sshCommand` as `fetch` does. Over those duplex transports the
@@ -32,6 +32,7 @@
   `commitTree` and `createTag` sign on request or per `commit.gpgSign` /
   `tag.gpgSign`, in the `gpg.format` configured. `SignatureTool` lets an app
   supply its own signer; on the web the default throws `UnsupportedError`.
+- API docs no longer carry broken references.
 
 ## 0.1.1
 

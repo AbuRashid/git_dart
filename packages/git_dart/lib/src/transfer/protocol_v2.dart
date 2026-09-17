@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import '../version.dart';
 
 import '../object_id.dart';
 import 'pkt_line.dart';
@@ -107,7 +108,7 @@ Uint8List lsRefsRequest({
   List<String> prefixes = const ['refs/heads/', 'refs/tags/'],
   bool peel = true,
   bool symrefs = true,
-  String agent = 'git/git_dart-0.1',
+  String agent = userAgent,
 }) {
   final body = BytesBuilder()
     ..add(PktLine.text('command=ls-refs\n').encode())
@@ -192,7 +193,7 @@ Uint8List fetchRequest({
   String? filter,
   bool ofsDelta = true,
   bool includeTag = true,
-  String agent = 'git/git_dart-0.1',
+  String agent = userAgent,
 }) {
   final body = BytesBuilder()
     ..add(PktLine.text('command=fetch\n').encode())

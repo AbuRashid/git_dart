@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import '../version.dart';
 
 import 'package:path/path.dart' as p;
 
@@ -84,7 +85,7 @@ class FetchResult {
 /// same line, at the same place, for the same reason.
 const int unpackLimit = 100;
 
-const _agent = 'git/git_dart-0.1';
+const _agent = userAgent;
 
 /// Fetches from [remote] into [repository].
 ///

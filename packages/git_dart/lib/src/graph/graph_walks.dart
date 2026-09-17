@@ -193,7 +193,8 @@ class HeapPriorityQueue<T> {
   }
 }
 
-/// Commits reachable from [from] and not from [notFrom].
+/// How many commits are reachable from [ours] and not [theirs] (`ahead`), and
+/// from [theirs] and not [ours] (`behind`).
 ///
 /// The pair of these is what `ahead` and `behind` are, and computing them by
 /// collecting both full ancestries and subtracting is exact and costs the size

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import '../version.dart';
 
 import '../hooks/hook_steps.dart';
 import '../hooks/hooks.dart';
@@ -554,7 +555,7 @@ List<String> _agree(Set<String> offered, {required bool sideBand}) => [
       else if (offered.contains('report-status'))
         'report-status',
       if (sideBand && offered.contains('side-band-64k')) 'side-band-64k',
-      'agent=git/git_dart-0.1',
+      'agent=$userAgent',
     ];
 
 /// The command section of a push request, flush included.
@@ -638,7 +639,7 @@ Future<PushResult> _pushHttp(
   final client = newHttpClient();
 
   Map<String, String> headersFor(Map<String, String> extra) => {
-        GitHttpHeaders.userAgent: 'git/git_dart-0.1',
+        GitHttpHeaders.userAgent: userAgent,
         if (credentials != null)
           GitHttpHeaders.authorization: credentials.authorizationHeader,
         ...extra,
