@@ -17,6 +17,13 @@ import 'ignore.dart';
 class StatusEntry {
   final String path;
 
+  /// Where the path was before a staged rename, and null otherwise.
+  ///
+  /// Git does not record that a file moved, so this is inferred the same way
+  /// a tree diff infers it: an addition and a deletion of the same or nearly
+  /// the same content are one change, not two (`algorithms.diff`).
+  final String? oldPath;
+
   /// HEAD to index: what a commit would record.
   final ChangeKind? staged;
 
@@ -28,6 +35,7 @@ class StatusEntry {
 
   const StatusEntry({
     required this.path,
+    this.oldPath,
     this.staged,
     this.unstaged,
     this.isUntracked = false,
@@ -51,7 +59,8 @@ class StatusEntry {
       };
 
   @override
-  String toString() => '$code $path';
+  String toString() =>
+      oldPath == null ? '$code $path' : '$code $oldPath -> $path';
 }
 
 class RepositoryStatus {
@@ -106,6 +115,9 @@ RepositoryStatus statusOf(
   bool includeUntracked = true,
   bool trustStatCache = true,
   bool collapseUntrackedDirectories = true,
+  bool detectRenames = true,
+  int renameThreshold = 50,
+  int renameLimit = 1000,
 }) {
   final workTree = repo.workTree;
   if (workTree == null) {
@@ -119,7 +131,6 @@ RepositoryStatus statusOf(
   final headId = repo.headId;
   final headTree = headId == null ? null : repo.treeOf(headId);
 
-  final staged = <String, ChangeKind>{};
   final unstaged = <String, ChangeKind>{};
   final conflicted = <String>{...index.conflicts.keys};
 
@@ -132,19 +143,67 @@ RepositoryStatus statusOf(
   final headByPath = <String, TreeEntry>{};
   if (headTree != null) _flatten(repo, headTree, '', headByPath);
 
+  final stagedChanges = <DiffEntry>[];
   for (final path in {...headByPath.keys, ...indexByPath.keys}) {
     if (conflicted.contains(path)) continue;
     final inHead = headByPath[path];
     final inIndex = indexByPath[path];
 
     if (inHead == null) {
-      staged[path] = ChangeKind.added;
+      stagedChanges.add(DiffEntry(
+        kind: ChangeKind.added,
+        newPath: path,
+        newMode: inIndex!.fileMode,
+        newId: inIndex.id,
+      ));
     } else if (inIndex == null) {
-      staged[path] = ChangeKind.deleted;
+      stagedChanges.add(DiffEntry(
+        kind: ChangeKind.deleted,
+        oldPath: path,
+        oldMode: inHead.mode,
+        oldId: inHead.id,
+      ));
     } else if (inHead.id != inIndex.id) {
-      staged[path] = ChangeKind.modified;
+      stagedChanges.add(DiffEntry(
+        kind: ChangeKind.modified,
+        oldPath: path,
+        newPath: path,
+        oldMode: inHead.mode,
+        newMode: inIndex.fileMode,
+        oldId: inHead.id,
+        newId: inIndex.id,
+      ));
     } else if (inHead.mode.text != inIndex.fileMode.text) {
-      staged[path] = ChangeKind.typeChanged;
+      stagedChanges.add(DiffEntry(
+        kind: ChangeKind.typeChanged,
+        oldPath: path,
+        newPath: path,
+        oldMode: inHead.mode,
+        newMode: inIndex.fileMode,
+        oldId: inHead.id,
+        newId: inIndex.id,
+      ));
+    }
+  }
+
+  // A staged move is an addition and a deletion in the index, exactly as it
+  // is in a tree: git records no such thing as a rename. The same pairing a
+  // tree diff makes is made here, so that a moved file is one change with
+  // both of its names rather than two changes that have lost each other.
+  stagedChanges.sort((a, b) => a.path.compareTo(b.path));
+  final staged = <String, ChangeKind>{};
+  final renamedFrom = <String, String>{};
+  for (final change in detectRenames
+      ? pairRenames(
+          repo.objects,
+          stagedChanges,
+          threshold: renameThreshold,
+          limit: renameLimit,
+        )
+      : stagedChanges) {
+    staged[change.path] = change.kind;
+    if (change.kind == ChangeKind.renamed) {
+      renamedFrom[change.path] = change.oldPath!;
     }
   }
 
@@ -216,6 +275,7 @@ RepositoryStatus statusOf(
     for (final path in {...staged.keys, ...unstaged.keys, ...conflicted})
       StatusEntry(
         path: path,
+        oldPath: renamedFrom[path],
         staged: staged[path],
         unstaged: unstaged[path],
         isConflicted: conflicted.contains(path),

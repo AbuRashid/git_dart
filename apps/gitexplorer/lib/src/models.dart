@@ -537,6 +537,11 @@ class TrackingData {
 class StatusRow {
   final String path;
 
+  /// Where the file was before a staged move, and null otherwise. Git records
+  /// no rename; this is the pairing git_dart infers, carried through so the
+  /// list can show a move as one row rather than two.
+  final String? oldPath;
+
   /// HEAD against the index: what a commit would record.
   final FileState? staged;
 
@@ -548,6 +553,7 @@ class StatusRow {
 
   const StatusRow({
     required this.path,
+    this.oldPath,
     this.staged,
     this.unstaged,
     this.isUntracked = false,

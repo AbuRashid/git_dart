@@ -1674,6 +1674,7 @@ class GitWorker {
         for (final entry in repo.status().entries)
           StatusRow(
             path: entry.path,
+            oldPath: entry.oldPath,
             staged: entry.staged == null ? null : _fromChange(entry.staged),
             unstaged:
                 entry.unstaged == null ? null : _fromChange(entry.unstaged),

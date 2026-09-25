@@ -2,6 +2,12 @@
 
 ## 0.4.0
 
+- `status` pairs staged renames. A move is an addition and a deletion in the
+  index, as it is in a tree, and status reported it as two unrelated changes
+  while tree diffs had inferred the pairing for releases. `StatusEntry` gains
+  `oldPath`, `status` gains `detectRenames`, `renameThreshold` and
+  `renameLimit` with the same meanings and defaults as `diffTrees`, and the
+  pairing uses the same two passes — exact content first, then similarity.
 - Index version 4 is read. Its paths are prefix-compressed against the entry
   before them — a count of bytes to drop, in git's own variable-width
   encoding, then the rest — and entries carry no padding. A repository git

@@ -2655,6 +2655,15 @@ class _StagingRow extends StatelessWidget {
         ),
       ),
       title: Text(row.path, overflow: TextOverflow.ellipsis),
+      // A move is one change with two names, and the name it left behind is
+      // what a reader following the file is looking for.
+      subtitle: row.oldPath == null
+          ? null
+          : Text(
+              'moved from ${row.oldPath}',
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall,
+            ),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

@@ -849,12 +849,18 @@ class Repository {
     bool includeUntracked = true,
     bool trustStatCache = true,
     bool collapseUntrackedDirectories = true,
+    bool detectRenames = true,
+    int renameThreshold = 50,
+    int renameLimit = 1000,
   }) =>
       statusOf(
         this,
         includeUntracked: includeUntracked,
         trustStatCache: trustStatCache,
         collapseUntrackedDirectories: collapseUntrackedDirectories,
+        detectRenames: detectRenames,
+        renameThreshold: renameThreshold,
+        renameLimit: renameLimit,
       );
 
   /// Checks out [revision]: the working tree and the index are made to match
