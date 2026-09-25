@@ -68,6 +68,18 @@ void commit(String message) {
   git(['commit', '-q', '-m', message]);
 }
 
+/// Marks a file executable in the way the platform records it.
+///
+/// `update-index --chmod=+x` is the whole story on Windows, where git reads
+/// no mode from the filesystem. Everywhere else the next `git add` reads the
+/// file's real mode back and undoes it, so the bit has to be on the file.
+void makeExecutable(String path) {
+  if (!Platform.isWindows) {
+    Process.runSync('chmod', ['+x', p.join(repoPath, path)]);
+  }
+  git(['update-index', '--chmod=+x', path]);
+}
+
 /// Ours, for the same arguments.
 Uint8List ours({
   ArchiveFormat format = ArchiveFormat.tar,
@@ -173,7 +185,7 @@ void main() {
     test('an executable keeps its bit', () {
       write('run.sh', '#!/bin/sh\n');
       git(['add', '-A']);
-      git(['update-index', '--chmod=+x', 'run.sh']);
+      makeExecutable('run.sh');
       commit('one');
 
       expect(ours(), gitArchive(['--format=tar', 'HEAD']));
@@ -401,7 +413,7 @@ void main() {
       write('run.sh', '#!/bin/sh\necho hello\n');
       write('plain.txt', 'ordinary\n');
       git(['add', '-A']);
-      git(['update-index', '--chmod=+x', 'run.sh']);
+      makeExecutable('run.sh');
       commit('one');
 
       final mine = zipEntries(ours(format: ArchiveFormat.zip));

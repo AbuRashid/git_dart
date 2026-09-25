@@ -216,7 +216,12 @@ void main() {
       final bytes = File(graphPath()).readAsBytesSync();
       bytes[4] = 99; // an impossible version
       final broken = File(graphPath());
-      Process.runSync('attrib', ['-R', graphPath()]);
+      // The graph is written read-only on Windows, where `attrib`
+      // clears the bit; on every other system there is no such bit and
+      // no such command.
+      if (Platform.isWindows) {
+        Process.runSync('attrib', ['-R', graphPath()]);
+      }
       broken.writeAsBytesSync(bytes);
 
       // A cache that cannot be read is a cache that is not used. Refusing to
@@ -297,7 +302,12 @@ void main() {
       repo.close();
 
       // git's, from a graph it wrote itself.
-      Process.runSync('attrib', ['-R', graphPath()]);
+      // The graph is written read-only on Windows, where `attrib`
+      // clears the bit; on every other system there is no such bit and
+      // no such command.
+      if (Platform.isWindows) {
+        Process.runSync('attrib', ['-R', graphPath()]);
+      }
       File(graphPath()).deleteSync();
       git(['commit-graph', 'write', '--reachable']);
 

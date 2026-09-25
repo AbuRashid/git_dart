@@ -120,15 +120,25 @@ void main() {
     });
 
     test('round-trips what was added, in the order it was added', () async {
+      // A path in this platform's own shape, because the name is derived by
+      // splitting it: a backslash separates directories on Windows and is an
+      // ordinary character everywhere else.
+      final picked = p.join(
+        Platform.isWindows ? r'C:\dev' : '/home/a/dev',
+        'flutter',
+      );
+
       await store.save(SavedState(repositories: [
-        SavedRepository.forPath(r'C:\dev\flutter'),
-        const SavedRepository(path: '/home/a/work', name: 'work'),
+        SavedRepository.forPath(picked),
+        // A path from another platform is carried unchanged: the store keeps
+        // what it was given rather than interpreting it.
+        const SavedRepository(path: r'C:\dev\work', name: 'work'),
       ]));
 
       final loaded = await store.load();
       expect(
         loaded.repositories.map((r) => r.path),
-        [r'C:\dev\flutter', '/home/a/work'],
+        [picked, r'C:\dev\work'],
       );
       expect(loaded.repositories.first.name, 'flutter');
     });
@@ -151,8 +161,13 @@ void main() {
     });
 
     test('writes the shape the specification pins', () async {
+      // The name is given rather than derived from the path: what this pins
+      // is the shape written to the file, and deriving it would make the
+      // vector depend on which platform is splitting `C:\dev\flutter`.
       await store.save(
-        SavedState(repositories: [SavedRepository.forPath(r'C:\dev\flutter')]),
+        const SavedState(repositories: [
+          SavedRepository(path: r'C:\dev\flutter', name: 'flutter'),
+        ]),
       );
       final written =
           File(p.join(home.path, RepositoryStore.fileName)).readAsStringSync();

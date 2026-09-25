@@ -59,6 +59,13 @@ String makeInner() {
 void addSubmodule(String at) {
   final url = 'file:///${innerPath.replaceAll(r'\', '/')}';
   git(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', url, at]);
+  // The working copy git just cloned has no identity of its own, and a test
+  // must not borrow whoever happens to be configured on the machine: an
+  // identity that exists on a laptop and not on a build server is the
+  // difference between a suite that passes everywhere and one that does not.
+  final inside = p.join(repoPath, at.replaceAll('/', p.separator));
+  git(['config', 'user.name', 'A'], cwd: inside);
+  git(['config', 'user.email', 'a@x'], cwd: inside);
   _clock += 60;
   git(['commit', '-q', '-m', 'add submodule']);
 }

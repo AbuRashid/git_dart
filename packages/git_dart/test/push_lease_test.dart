@@ -111,6 +111,12 @@ void main() {
 
     Directory(serverPath).createSync(recursive: true);
     git(['init', '-q', '--bare', '-b', 'main'], cwd: serverPath);
+    // This library writes a reflog only when it can say who moved the ref,
+    // so without an identity here the server's log is empty — the library
+    // behaving as documented, and the test quietly depending on whoever the
+    // machine happens to be configured as.
+    git(['config', 'user.name', 'Server'], cwd: serverPath);
+    git(['config', 'user.email', 'server@x'], cwd: serverPath);
 
     // A seed commit, pushed, then cloned twice: two people with the same
     // starting point, which is what a race needs.

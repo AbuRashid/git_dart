@@ -284,7 +284,14 @@ int _directorySize(String path) {
   if (!directory.existsSync()) return 0;
   var total = 0;
   for (final entry in directory.listSync(recursive: true)) {
-    if (entry is File) total += entry.lengthSync();
+    if (entry is! File) continue;
+    try {
+      total += entry.lengthSync();
+    } on FileSystemException {
+      // A lock file git wrote between the listing and this read, and removed
+      // again. It is not part of the repository's size and its absence is
+      // not a failure.
+    }
   }
   return total;
 }
