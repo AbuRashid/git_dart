@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+- New `abortApply`, which abandons a cherry-pick or revert that stopped on
+  conflicts: the index and working tree go back to where it started and the
+  sequencer state and `MERGE_MSG` are removed. Rebase already had
+  `abortRebase`.
+- `continueApply` and `continueRebase` take an optional `message`, which
+  replaces the stopped commit's own, as editing it on `--continue` does.
+- `continueApply` refuses when the operation in progress is a rebase, instead
+  of finishing one step of it as though it were a cherry-pick.
+
 ## 0.3.0
 
 - `RemoteStore.rename` now does what `git remote rename` does: the tracking

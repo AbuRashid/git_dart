@@ -6,6 +6,7 @@ import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/identity.dart';
 import '../repository.dart';
+import '../worktree/reset.dart';
 import 'merge.dart';
 import 'sequencer.dart';
 
@@ -223,6 +224,9 @@ ApplyResult _apply(
 String _messageFor(Commit source, {required bool revert}) =>
     revert ? revertMessage(source) : source.message;
 
+String _terminated(String message) =>
+    message.endsWith('\n') ? message : '$message\n';
+
 /// Finishes a cherry-pick or revert whose conflicts have been resolved and
 /// staged.
 ///
@@ -230,9 +234,16 @@ String _messageFor(Commit source, {required bool revert}) =>
 /// which is why the sequencer wrote its name down: by the time a person has
 /// resolved the conflict, nothing else in the repository still knows what was
 /// being applied.
-ObjectId continueApply(Repository repository, {Identity? committer}) {
+///
+/// [message] replaces the one the applied commit would have carried, as
+/// editing it in `git cherry-pick --continue` does.
+ObjectId continueApply(
+  Repository repository, {
+  Identity? committer,
+  String? message,
+}) {
   final state = SequencerState.read(repository.gitDirectory);
-  if (state == null) {
+  if (state == null || state.operation == SequencerOperation.rebase) {
     throw StateError('no cherry-pick or revert is in progress');
   }
 
@@ -253,7 +264,9 @@ ObjectId continueApply(Repository repository, {Identity? committer}) {
 
   final id = repository.commitTree(
     tree: repository.writeTreeFromIndex(),
-    message: _messageFor(source, revert: revert),
+    message: message == null || message.trim().isEmpty
+        ? _messageFor(source, revert: revert)
+        : _terminated(message),
     author: revert ? who : source.author,
     committer: who,
     parents: [repository.headId!],
@@ -261,8 +274,26 @@ ObjectId continueApply(Repository repository, {Identity? committer}) {
   );
 
   SequencerState.clear(repository.gitDirectory);
-  final message = fs.file(p.join(repository.gitDirectory, 'MERGE_MSG'));
-  if (message.existsSync()) message.deleteSync();
+  final prepared = fs.file(p.join(repository.gitDirectory, 'MERGE_MSG'));
+  if (prepared.existsSync()) prepared.deleteSync();
 
   return id;
+}
+
+/// Abandons a cherry-pick or revert that stopped on conflicts: the index and
+/// working tree go back to where the operation started, and the record of it
+/// is removed.
+///
+/// Nothing was committed while it was stopped, so going back loses only the
+/// half-applied change and any resolution made to it.
+void abortApply(Repository repository) {
+  final state = SequencerState.read(repository.gitDirectory);
+  if (state == null || state.operation == SequencerOperation.rebase) {
+    throw StateError('no cherry-pick or revert is in progress');
+  }
+
+  reset(repository, state.originalHead, mode: ResetMode.hard);
+  SequencerState.clear(repository.gitDirectory);
+  final prepared = fs.file(p.join(repository.gitDirectory, 'MERGE_MSG'));
+  if (prepared.existsSync()) prepared.deleteSync();
 }

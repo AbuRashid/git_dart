@@ -277,7 +277,14 @@ RebaseResult _replay(
 }
 
 /// Carries on a rebase whose conflicts have been resolved and staged.
-RebaseResult continueRebase(Repository repository, {Identity? committer}) {
+///
+/// [message] replaces the stopped commit's own message; the commits replayed
+/// after it keep theirs.
+RebaseResult continueRebase(
+  Repository repository, {
+  Identity? committer,
+  String? message,
+}) {
   final state = SequencerState.read(repository.gitDirectory);
   if (state == null || state.operation != SequencerOperation.rebase) {
     throw StateError('no rebase is in progress');
@@ -304,7 +311,11 @@ RebaseResult continueRebase(Repository repository, {Identity? committer}) {
     }
     replayed.add(repository.commitTree(
       tree: tree,
-      message: source.message,
+      message: message == null || message.trim().isEmpty
+          ? source.message
+          : message.endsWith('\n')
+              ? message
+              : '$message\n',
       author: source.author,
       committer: who,
       parents: [head],

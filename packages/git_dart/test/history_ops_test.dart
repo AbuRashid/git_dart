@@ -459,4 +459,123 @@ void main() {
       expect(git(['rev-parse', 'HEAD']).trim(), head.hex);
     });
   });
+  // -------------------------------------------------------------------------
+  group('finishing and abandoning a stopped operation', () {
+    /// A commit on `side` that conflicts with `main`, which is checked out.
+    String conflictingCommit() {
+      git(['checkout', '-q', '-b', 'side']);
+      write('a.txt', 'theirs\ntwo\nthree\n');
+      commitAll('side edits one');
+      final source = git(['rev-parse', 'HEAD']).trim();
+      git(['checkout', '-q', 'main']);
+      write('a.txt', 'ours\ntwo\nthree\n');
+      commitAll('main edits one');
+      return source;
+    }
+
+    test('an aborted cherry-pick leaves the branch and files as they were',
+        () {
+      final source = conflictingCommit();
+      final before = git(['rev-parse', 'HEAD']).trim();
+
+      final repo = Repository.open(repoPath);
+      expect(
+        cherryPick(repo, ObjectId.fromHex(source)).outcome,
+        ApplyOutcome.conflicted,
+      );
+      abortApply(repo);
+      expect(() => abortApply(repo), throwsStateError);
+      repo.close();
+
+      expect(git(['rev-parse', 'HEAD']).trim(), before);
+      expect(git(['status', '--porcelain']).trim(), isEmpty);
+      expect(read('a.txt'), 'ours\ntwo\nthree\n');
+      for (final name in ['CHERRY_PICK_HEAD', 'MERGE_MSG', 'sequencer']) {
+        expect(
+          FileSystemEntity.typeSync(p.join(repoPath, '.git', name)),
+          FileSystemEntityType.notFound,
+          reason: name,
+        );
+      }
+    });
+
+    test('an aborted revert is undone the same way', () {
+      write('a.txt', 'changed\ntwo\nthree\n');
+      commitAll('change one');
+      final bad = git(['rev-parse', 'HEAD']).trim();
+      write('a.txt', 'changed again\ntwo\nthree\n');
+      commitAll('change it again');
+      final before = git(['rev-parse', 'HEAD']).trim();
+
+      final repo = Repository.open(repoPath);
+      expect(
+        revert(repo, ObjectId.fromHex(bad)).outcome,
+        ApplyOutcome.conflicted,
+      );
+      abortApply(repo);
+      repo.close();
+
+      expect(git(['rev-parse', 'HEAD']).trim(), before);
+      expect(git(['status', '--porcelain']).trim(), isEmpty);
+    });
+
+    test('abortApply does not abandon a rebase', () {
+      git(['checkout', '-q', '-b', 'side']);
+      write('b.txt', 'side\n');
+      commitAll('side');
+      git(['checkout', '-q', 'main']);
+      write('b.txt', 'main\n');
+      commitAll('main');
+      git(['checkout', '-q', 'side']);
+
+      final repo = Repository.open(repoPath);
+      expect(rebase(repo, repo.resolve('main')!).outcome,
+          RebaseOutcome.conflicted);
+      expect(() => abortApply(repo), throwsStateError);
+      expect(() => continueApply(repo), throwsStateError);
+      abortRebase(repo);
+      repo.close();
+    });
+
+    test('a continued cherry-pick can carry a new message', () {
+      final source = conflictingCommit();
+
+      final repo = Repository.open(repoPath);
+      cherryPick(repo, ObjectId.fromHex(source));
+      write('a.txt', 'both\ntwo\nthree\n');
+      repo.stage('a.txt');
+      continueApply(repo, message: 'take side\'s edit, merged by hand');
+      repo.close();
+
+      expect(
+        git(['log', '-1', '--format=%B']).trim(),
+        'take side\'s edit, merged by hand',
+      );
+      // Still the original author's change.
+      expect(git(['log', '-1', '--format=%an']).trim(), 'A');
+      expect(git(['status', '--porcelain']).trim(), isEmpty);
+    });
+
+    test('a continued rebase can reword the commit that stopped it', () {
+      git(['checkout', '-q', '-b', 'side']);
+      write('b.txt', 'side\n');
+      commitAll('side edits b');
+      git(['checkout', '-q', 'main']);
+      write('b.txt', 'main\n');
+      commitAll('main edits b');
+      git(['checkout', '-q', 'side']);
+
+      final repo = Repository.open(repoPath);
+      rebase(repo, repo.resolve('main')!);
+      write('b.txt', 'both\n');
+      repo.stage('b.txt');
+      final result = continueRebase(repo, message: 'b, from both sides');
+      repo.close();
+
+      expect(result.outcome, RebaseOutcome.done);
+      expect(git(['log', '-1', '--format=%s']).trim(), 'b, from both sides');
+      expect(git(['rev-parse', 'HEAD~1']).trim(),
+          git(['rev-parse', 'main']).trim());
+    });
+  });
 }
