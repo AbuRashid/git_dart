@@ -11,8 +11,9 @@ browser.
 
 **See git_dart in action** in the live demo of
 [Git Explorer](https://gitexplorer.manhaj.dev), an application built entirely
-on this library and usable in the browser: it clones real repositories and
-browses, edits, stages and commits them, with no server holding them.
+on this library. The demo is interactive and hosts its own repository to clone:
+the clone, the history, the diffs, the staging and the commits are all this
+library, running in your browser.
 
 Derived from [`systems/git/v0`](../../specs/git.umsg).
 

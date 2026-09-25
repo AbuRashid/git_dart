@@ -14,9 +14,9 @@ explorer that browses, edits, stages, commits, clones, fetches, pulls and pushes
 on desktop, mobile and the web.
 
 **See git_dart in action** in the
-[live demo](https://gitexplorer.manhaj.dev), which runs the whole application —
-and so the whole library — in the browser: it clones real repositories and
-works on them there, with no server holding them.
+[live demo](https://gitexplorer.manhaj.dev): an interactive demo that hosts its
+own repository to clone, and runs the whole application — and so the whole
+library — in your browser.
 
 ## What is here
 
