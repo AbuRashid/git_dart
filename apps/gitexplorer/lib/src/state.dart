@@ -143,7 +143,6 @@ class ExplorerState extends ChangeNotifier {
   bool isLoading(String repository, String path) =>
       _loading.contains((repository, path));
 
-
   Future<void> start() async {
     await _git.start();
     final saved = await _store.load();
@@ -299,6 +298,220 @@ class ExplorerState extends ChangeNotifier {
     }
   }
 
+  /// Runs [action], and on success re-reads everything the repository shows:
+  /// a checkout, a merge or a reset changes the files, the index, HEAD and
+  /// the history all at once.
+  ///
+  /// Returns null when the worker refused, in which case [error] says why.
+  Future<T?> _moving<T>(
+    String repository,
+    Future<T> Function() action,
+  ) async {
+    try {
+      final value = await action();
+      _error = null;
+      if (value is RepositorySummary) _summaries[repository] = value;
+      await refresh(repository);
+      return value;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// Checks out [name]. A refusal that names the files in the way comes back
+  /// as an outcome rather than an error, so the caller can offer to force it.
+  Future<CheckoutOutcome?> checkoutBranch(
+    String repository,
+    String name, {
+    bool force = false,
+  }) =>
+      _moving(
+        repository,
+        () => _git.checkoutBranch(repository, name, force: force),
+      );
+
+  Future<CheckoutOutcome?> createBranch(
+    String repository,
+    String name, {
+    String? startPoint,
+    bool fromRemote = false,
+    bool checkout = false,
+  }) =>
+      _moving(
+        repository,
+        () => _git.createBranch(
+          repository,
+          name,
+          startPoint: startPoint,
+          fromRemote: fromRemote,
+          checkout: checkout,
+        ),
+      );
+
+  OperationResult? _lastOperation;
+
+  /// What the last merge, cherry-pick, revert, rebase or stash application
+  /// did, so the pane can say it by name (`care.reported`).
+  OperationResult? get lastOperation => _lastOperation;
+
+  /// Runs an operation that reports an [OperationResult], keeping it for the
+  /// pane. A refusal comes back as null with [error] set, as elsewhere.
+  Future<OperationResult?> _operation(
+    String repository,
+    Future<OperationResult> Function() action,
+  ) async {
+    _lastOperation = null;
+    final result = await _moving(repository, action);
+    _lastOperation = result;
+    if (result?.error != null) _error = result!.error;
+    notifyListeners();
+    return result;
+  }
+
+  Future<OperationResult?> mergeBranch(
+    String repository,
+    String source, {
+    bool fromRemote = false,
+  }) =>
+      _operation(
+        repository,
+        () => _git.mergeBranch(repository, source, fromRemote: fromRemote),
+      );
+
+  Future<OperationResult?> cherryPick(String repository, String commitId) =>
+      _operation(repository, () => _git.cherryPick(repository, commitId));
+
+  Future<OperationResult?> revertCommit(String repository, String commitId) =>
+      _operation(repository, () => _git.revertCommit(repository, commitId));
+
+  Future<OperationResult?> rebaseOnto(
+    String repository,
+    String onto, {
+    bool fromRemote = false,
+  }) =>
+      _operation(
+        repository,
+        () => _git.rebaseOnto(repository, onto, fromRemote: fromRemote),
+      );
+
+  /// Finishes a stopped cherry-pick, revert or rebase with what is staged.
+  Future<OperationResult?> continueOperation(
+    String repository,
+    String message,
+  ) =>
+      _operation(
+        repository,
+        () => _git.continueOperation(repository, message),
+      );
+
+  Future<OperationResult?> applyStash(
+    String repository,
+    int index, {
+    bool pop = false,
+  }) =>
+      _operation(
+        repository,
+        () => _git.applyStash(repository, index, pop: pop),
+      );
+
+  void dismissLastOperation() {
+    _lastOperation = null;
+    notifyListeners();
+  }
+
+  Future<bool> abortOperation(String repository) async {
+    final summary =
+        await _moving(repository, () => _git.abortOperation(repository));
+    if (summary != null) {
+      _lastOperation = null;
+      _lastPull = null;
+      notifyListeners();
+    }
+    return summary != null;
+  }
+
+  Future<bool> saveStash(
+    String repository, {
+    String message = '',
+    bool includeUntracked = false,
+  }) async =>
+      await _moving(
+        repository,
+        () => _git.saveStash(
+          repository,
+          message: message,
+          includeUntracked: includeUntracked,
+        ),
+      ) !=
+      null;
+
+  Future<bool> dropStash(String repository, int index) async =>
+      await _moving(repository, () => _git.dropStash(repository, index)) !=
+      null;
+
+  /// The commits [branch] has that HEAD does not. Empty, with [error] set,
+  /// when that could not be worked out.
+  Future<List<CommitData>> unmerged(
+    String repository,
+    String branch, {
+    bool fromRemote = false,
+  }) async {
+    try {
+      return await _git.unmerged(repository, branch, fromRemote: fromRemote);
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      notifyListeners();
+      return const [];
+    }
+  }
+
+  Future<bool> setUpstream(
+    String repository,
+    String branch,
+    String? upstream,
+  ) async =>
+      await _moving(
+        repository,
+        () => _git.setUpstream(repository, branch, upstream),
+      ) !=
+      null;
+
+  Future<bool> createTag(
+    String repository,
+    String name, {
+    String? at,
+    String? message,
+  }) async =>
+      await _moving(
+        repository,
+        () => _git.createTag(repository, name, at: at, message: message),
+      ) !=
+      null;
+
+  Future<bool> deleteTag(String repository, String name) async =>
+      await _moving(repository, () => _git.deleteTag(repository, name)) != null;
+
+  Future<bool> discardChanges(String repository, String path) async {
+    final staging = await _moving(
+      repository,
+      () => _git.discardChanges(repository, path),
+    );
+    return staging != null;
+  }
+
+  Future<bool> resetBranch(
+    String repository,
+    String commitId,
+    ResetStrength strength,
+  ) async =>
+      await _moving(
+        repository,
+        () => _git.resetBranch(repository, commitId, strength),
+      ) !=
+      null;
+
   // ---- settings -----------------------------------------------------------
 
   final _settings = <String, SettingValue>{};
@@ -391,6 +604,22 @@ class ExplorerState extends ChangeNotifier {
       _error = failure.message;
     }
     notifyListeners();
+  }
+
+  Future<bool> renameRemote(String repository, String from, String to) async {
+    try {
+      _remotes = await _git.renameRemote(repository, from, to);
+      _error = null;
+      // Branches that follow the remote now name it differently.
+      final saved = _saved.where((r) => r.path == repository).firstOrNull;
+      if (saved != null) await _refreshSummary(saved);
+      return true;
+    } on GitWorkerException catch (failure) {
+      _error = failure.message;
+      return false;
+    } finally {
+      notifyListeners();
+    }
   }
 
   Future<void> removeRemote(String repository, String name) async {
@@ -827,23 +1056,7 @@ class ExplorerState extends ChangeNotifier {
     _saved[index] = SavedRepository(path: path, name: name.trim());
     final summary = _summaries[path];
     if (summary != null) {
-      _summaries[path] = RepositorySummary(
-        path: summary.path,
-        name: name.trim(),
-        available: summary.available,
-        reason: summary.reason,
-        error: summary.error,
-        branch: summary.branch,
-        detached: summary.detached,
-        headId: summary.headId,
-        headSummary: summary.headSummary,
-        headWhen: summary.headWhen,
-        headAuthor: summary.headAuthor,
-        changedCount: summary.changedCount,
-        untrackedCount: summary.untrackedCount,
-        branches: summary.branches,
-        tags: summary.tags,
-      );
+      _summaries[path] = summary.renamed(name.trim());
     }
     await _saveState();
     notifyListeners();
@@ -943,7 +1156,8 @@ class ExplorerState extends ChangeNotifier {
     for (final saved in _saved) {
       final summary = _summaries[saved.path] ??
           RepositorySummary(path: saved.path, name: saved.name);
-      out.add(TreeRow(depth: 0, repositoryPath: saved.path, repository: summary));
+      out.add(
+          TreeRow(depth: 0, repositoryPath: saved.path, repository: summary));
       if (summary.available && isExpanded(saved.path, '')) {
         _appendChildren(out, saved.path, '', 1);
       }
@@ -1144,13 +1358,13 @@ class ExplorerState extends ChangeNotifier {
   }
 
   Future<void> selectCommitFile(String path) async {
-    if (_selection case CommitSelected(:final repositoryPath, :final commitId)) {
+    if (_selection
+        case CommitSelected(:final repositoryPath, :final commitId)) {
       _commitFilePath = path;
       _commitFileDiff = null;
       notifyListeners();
       try {
-        _commitFileDiff =
-            await _git.commitDiff(repositoryPath, commitId, path);
+        _commitFileDiff = await _git.commitDiff(repositoryPath, commitId, path);
       } on GitWorkerException catch (failure) {
         _error = failure.message;
       }

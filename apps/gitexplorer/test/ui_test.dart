@@ -1039,6 +1039,357 @@ void main() {
     });
   });
 
+  group('branches, tags, merging and undoing', () {
+    /// A repository of its own, so what these tests move cannot disturb the
+    /// fixture every other test shares.
+    String own(String name) {
+      final path = p.join(scratch.path, 'own-$name');
+      Directory(path).createSync(recursive: true);
+      String run(List<String> arguments) {
+        final result = Process.runSync('git', arguments,
+            workingDirectory: path, stdoutEncoding: utf8);
+        if (result.exitCode != 0) {
+          fail('git ${arguments.join(' ')} failed:\n${result.stderr}');
+        }
+        return result.stdout as String;
+      }
+
+      run(['init', '-q', '-b', 'main']);
+      run(['config', 'user.name', 'A']);
+      run(['config', 'user.email', 'a@x']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('one\n');
+      run(['add', '.']);
+      run(['commit', '-q', '-m', 'first']);
+      return path;
+    }
+
+    String gitIn(String path, List<String> arguments) {
+      final result = Process.runSync('git', arguments,
+          workingDirectory: path, stdoutEncoding: utf8);
+      if (result.exitCode != 0) {
+        fail('git ${arguments.join(' ')} failed:\n${result.stderr}');
+      }
+      return (result.stdout as String).trim();
+    }
+
+    Finder tab(String label) => find.byWidgetPredicate(
+          (w) => w is Tab && (w.text ?? '').startsWith(label),
+        );
+
+    Finder menuOf(String rowText) => find.descendant(
+          of: find.widgetWithText(ListTile, rowText),
+          matching: find.byIcon(Icons.more_vert),
+        );
+
+    Future<ExplorerState> open(WidgetTester tester, String path) async {
+      final state = await pumpExplorer(tester, withRepository: false);
+      await act(tester, () => state.addRepository(path));
+      await act(tester, () => state.selectRepository(path));
+      return state;
+    }
+
+    testWidgets('tapping a branch switches to it', (tester) async {
+      final path = own('switch');
+      gitIn(path, ['branch', 'other']);
+      await open(tester, path);
+
+      await tapAndWait(tester, tab('Branches'));
+      await tapAndWait(tester, find.widgetWithText(ListTile, 'other'));
+
+      expect(gitIn(path, ['symbolic-ref', '--short', 'HEAD']), 'other');
+      expect(find.text('Switched to other'), findsOneWidget);
+      expect(find.text('checked out'), findsOneWidget);
+    });
+
+    testWidgets('a switch that would lose changes names them and asks first',
+        (tester) async {
+      final path = own('switch-blocked');
+      gitIn(path, ['checkout', '-q', '-b', 'other']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('other\n');
+      gitIn(path, ['commit', '-q', '-am', 'other']);
+      gitIn(path, ['checkout', '-q', 'main']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('mine\n');
+      await open(tester, path);
+
+      await tapAndWait(tester, tab('Branches'));
+      await tapAndWait(tester, find.widgetWithText(ListTile, 'other'));
+
+      expect(find.text('Switch to other anyway?'), findsOneWidget);
+      expect(find.text('a.txt'), findsOneWidget);
+
+      // Cancelling changes nothing.
+      await tapAndWait(tester, find.text('Cancel'));
+      expect(gitIn(path, ['symbolic-ref', '--short', 'HEAD']), 'main');
+      expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'mine\n');
+
+      // Agreeing switches, and the change is gone as the dialog said.
+      await tapAndWait(tester, find.widgetWithText(ListTile, 'other'));
+      await tapAndWait(tester, find.text('Discard and switch'));
+      expect(gitIn(path, ['symbolic-ref', '--short', 'HEAD']), 'other');
+      expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'other\n');
+    });
+
+    testWidgets('a new branch is created and switched to', (tester) async {
+      final path = own('new-branch');
+      await open(tester, path);
+
+      await tapAndWait(tester, tab('Branches'));
+      await tapAndWait(tester, find.text('New branch'));
+      await tester.enterText(find.byType(TextField).last, 'feature/new');
+      await tapAndWait(tester, find.text('Create'));
+
+      expect(gitIn(path, ['symbolic-ref', '--short', 'HEAD']), 'feature/new');
+      expect(find.text('Created and switched to feature/new'), findsOneWidget);
+    });
+
+    testWidgets('a merge in progress says so, and can be abandoned',
+        (tester) async {
+      final path = own('merge-banner');
+      gitIn(path, ['checkout', '-q', '-b', 'side']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('theirs\n');
+      gitIn(path, ['commit', '-q', '-am', 'theirs']);
+      gitIn(path, ['checkout', '-q', 'main']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('ours\n');
+      gitIn(path, ['commit', '-q', '-am', 'ours']);
+      final state = await open(tester, path);
+
+      await tapAndWait(tester, tab('Branches'));
+      await tapAndWait(tester, menuOf('side'));
+      await tapAndWait(tester, find.text('Merge into main'));
+
+      expect(state.summaryFor(path)!.merging, isTrue);
+      expect(find.textContaining('1 file needs resolving'), findsOneWidget);
+      expect(find.textContaining('A merge is in progress'), findsOneWidget);
+
+      await tapAndWait(tester, find.widgetWithText(TextButton, 'Abort merge'));
+      await tapAndWait(tester, find.widgetWithText(FilledButton, 'Abort merge'));
+
+      expect(find.textContaining('A merge is in progress'), findsNothing);
+      expect(
+        File(p.join(path, '.git', 'MERGE_HEAD')).existsSync(),
+        isFalse,
+      );
+      expect(gitIn(path, ['status', '--porcelain']), isEmpty);
+    });
+
+    testWidgets('a merge in progress offers its message to the commit box',
+        (tester) async {
+      final path = own('merge-finish');
+      gitIn(path, ['checkout', '-q', '-b', 'side']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('theirs\n');
+      gitIn(path, ['commit', '-q', '-am', 'theirs']);
+      gitIn(path, ['checkout', '-q', 'main']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('ours\n');
+      gitIn(path, ['commit', '-q', '-am', 'ours']);
+      final state = await open(tester, path);
+
+      await act(tester, () async => state.mergeBranch(path, 'side'));
+      File(p.join(path, 'a.txt')).writeAsStringSync('both\n');
+      await act(tester, () => state.setStaged(path, 'a.txt', staged: true));
+
+      await tapAndWait(tester, tab('Staged'));
+      expect(find.text("Merge branch 'side'"), findsOneWidget);
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Commit the merge'),
+      );
+      expect(button.onPressed, isNotNull);
+    });
+
+    testWidgets('a tag is created from the dialog and deleted with a '
+        'confirmation', (tester) async {
+      final path = own('tags');
+      await open(tester, path);
+
+      await tapAndWait(tester, tab('Branches'));
+      await tapAndWait(tester, find.text('New tag'));
+      await tester.enterText(find.byType(TextField).at(0), 'v1');
+      await tester.enterText(find.byType(TextField).at(1), 'first release');
+      await tapAndWait(tester, find.text('Create'));
+
+      expect(gitIn(path, ['cat-file', '-t', 'v1']), 'tag');
+      expect(find.widgetWithText(ListTile, 'v1'), findsOneWidget);
+
+      await tapAndWait(tester, menuOf('v1'));
+      await tapAndWait(tester, find.text('Delete…'));
+      expect(find.text('Delete v1?'), findsOneWidget);
+      await tapAndWait(tester, find.widgetWithText(FilledButton, 'Delete'));
+
+      expect(gitIn(path, ['tag', '-l']), isEmpty);
+    });
+
+    testWidgets('a changed file can be discarded, after asking',
+        (tester) async {
+      final path = own('discard');
+      File(p.join(path, 'a.txt')).writeAsStringSync('edited\n');
+      File(p.join(path, 'new.txt')).writeAsStringSync('untracked\n');
+      await open(tester, path);
+
+      await tapAndWait(tester, tab('Staged'));
+      // Only the tracked file offers it: the untracked one's only copy is
+      // the one on disk.
+      expect(find.byTooltip('Discard changes'), findsOneWidget);
+
+      await tapAndWait(tester, find.byTooltip('Discard changes'));
+      expect(find.text('Discard changes to a.txt?'), findsOneWidget);
+      await tapAndDrain(tester, find.widgetWithText(FilledButton, 'Discard'));
+
+      expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'one\n');
+      expect(File(p.join(path, 'new.txt')).existsSync(), isTrue);
+    });
+
+    testWidgets('the branch can be reset from the history, choosing how much '
+        'to keep', (tester) async {
+      final path = own('reset');
+      final first = gitIn(path, ['rev-parse', 'HEAD']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('two\n');
+      gitIn(path, ['commit', '-q', '-am', 'second']);
+      await open(tester, path);
+
+      // The history is the first tab; the older commit is the second row.
+      await tapAndWait(
+        tester,
+        find.descendant(
+          of: find.widgetWithText(ListTile, 'first'),
+          matching: find.byIcon(Icons.more_vert),
+        ),
+      );
+      await tapAndWait(tester, find.text('Reset main to here…'));
+      await tapAndWait(tester, find.text(ResetStrength.hard.label));
+      await tapAndDrain(tester, find.widgetWithText(FilledButton, 'Reset'));
+
+      expect(gitIn(path, ['rev-parse', 'HEAD']), first);
+      expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'one\n');
+      expect(gitIn(path, ['status', '--porcelain']), isEmpty);
+    });
+
+    testWidgets('a remote can be renamed from its menu', (tester) async {
+      final origin = own('rename-origin');
+      final path = own('rename-local');
+      gitIn(path, ['remote', 'add', 'origin', origin]);
+      gitIn(path, ['fetch', '-q', 'origin']);
+      await open(tester, path);
+
+      await tapAndWait(tester, tab('Remotes'));
+      await tapAndWait(tester, find.byTooltip('Remote actions'));
+      await tapAndWait(tester, find.text('Rename…'));
+      await tester.enterText(find.byType(TextField).last, 'upstream');
+      await tapAndWait(tester, find.widgetWithText(FilledButton, 'Rename'));
+
+      expect(gitIn(path, ['remote']), 'upstream');
+      expect(
+        gitIn(path, ['rev-parse', 'refs/remotes/upstream/main']),
+        gitIn(origin, ['rev-parse', 'main']),
+      );
+    });
+
+    testWidgets('changes are stashed from the Staged tab and popped back',
+        (tester) async {
+      final path = own('stash');
+      File(p.join(path, 'a.txt')).writeAsStringSync('edited\n');
+      await open(tester, path);
+
+      await tapAndWait(tester, tab('Staged'));
+      await tapAndWait(tester, find.text('Stash changes'));
+      await tester.enterText(find.byType(TextField).last, 'for later');
+      await tapAndDrain(tester, find.widgetWithText(FilledButton, 'Stash'));
+      await tapAndWait(tester, tab('Staged'));
+
+      expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'one\n');
+      expect(find.widgetWithText(ListTile, 'for later'), findsOneWidget);
+
+      await tapAndWait(tester, find.byTooltip('Stash actions'));
+      await tapAndDrain(tester, find.text('Apply and drop'));
+      await tapAndWait(tester, tab('Staged'));
+
+      expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'edited\n');
+      expect(find.text('Nothing stashed.'), findsOneWidget);
+      expect(find.textContaining('Applied and dropped stash@{0}'),
+          findsOneWidget);
+    });
+
+    testWidgets('a commit is cherry-picked from another branch\'s menu',
+        (tester) async {
+      final path = own('pick');
+      gitIn(path, ['checkout', '-q', '-b', 'side']);
+      File(p.join(path, 'b.txt')).writeAsStringSync('bee\n');
+      gitIn(path, ['add', '.']);
+      gitIn(path, ['commit', '-q', '-m', 'add b']);
+      gitIn(path, ['checkout', '-q', 'main']);
+      await open(tester, path);
+
+      await tapAndWait(tester, tab('Branches'));
+      await tapAndWait(tester, menuOf('side'));
+      await tapAndWait(tester, find.text('Cherry-pick a commit…'));
+      expect(find.text('Cherry-pick from side onto main'), findsOneWidget);
+      await tapAndDrain(tester, find.text('add b'));
+
+      expect(gitIn(path, ['log', '-1', '--format=%s']), 'add b');
+      expect(File(p.join(path, 'b.txt')).existsSync(), isTrue);
+      expect(find.textContaining('Cherry-picked'), findsOneWidget);
+    });
+
+    testWidgets('a commit is reverted from the history', (tester) async {
+      final path = own('revert');
+      File(p.join(path, 'b.txt')).writeAsStringSync('bee\n');
+      gitIn(path, ['add', '.']);
+      gitIn(path, ['commit', '-q', '-m', 'add b']);
+      await open(tester, path);
+
+      await tapAndWait(
+        tester,
+        find.descendant(
+          of: find.widgetWithText(ListTile, 'add b'),
+          matching: find.byIcon(Icons.more_vert),
+        ),
+      );
+      await tapAndDrain(tester, find.text('Revert this commit'));
+
+      expect(gitIn(path, ['log', '-1', '--format=%s']), 'Revert "add b"');
+      expect(File(p.join(path, 'b.txt')).existsSync(), isFalse);
+    });
+
+    testWidgets('a rebase asks first, stops on a conflict, and the commit box '
+        'continues it', (tester) async {
+      final path = own('rebase');
+      gitIn(path, ['checkout', '-q', '-b', 'side']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('theirs\n');
+      gitIn(path, ['commit', '-q', '-am', 'side edits a']);
+      gitIn(path, ['checkout', '-q', 'main']);
+      File(p.join(path, 'a.txt')).writeAsStringSync('ours\n');
+      gitIn(path, ['commit', '-q', '-am', 'main edits a']);
+      gitIn(path, ['checkout', '-q', 'side']);
+      final state = await open(tester, path);
+
+      await tapAndWait(tester, tab('Branches'));
+      await tapAndWait(tester, menuOf('main'));
+      await tapAndWait(tester, find.text('Rebase side onto this…'));
+      expect(find.text('Rebase side onto main?'), findsOneWidget);
+      await tapAndDrain(tester, find.widgetWithText(FilledButton, 'Rebase'));
+
+      expect(state.summaryFor(path)!.inProgress, InProgress.rebase);
+      expect(find.textContaining('Rebasing: stopped at'), findsOneWidget);
+      expect(find.widgetWithText(TextButton, 'Abort rebase'), findsOneWidget);
+
+      File(p.join(path, 'a.txt')).writeAsStringSync('both\n');
+      await act(tester, () => state.setStaged(path, 'a.txt', staged: true));
+      await tapAndWait(tester, tab('Staged'));
+
+      // The stopped commit's message is offered, and the button says what
+      // it will do.
+      expect(find.text('side edits a'), findsWidgets);
+      await tapAndDrain(
+        tester,
+        find.widgetWithText(FilledButton, 'Continue the rebase'),
+      );
+
+      expect(state.summaryFor(path)!.busy, isFalse);
+      expect(find.textContaining('Rebasing: stopped at'), findsNothing);
+      expect(gitIn(path, ['merge-base', 'main', 'side']),
+          gitIn(path, ['rev-parse', 'main']));
+      expect(gitIn(path, ['status', '--porcelain']), isEmpty);
+    });
+  });
+
   testWidgets('a missing folder is not offered a repository', (tester) async {
     final gone = p.join(scratch.path, 'not-here');
 

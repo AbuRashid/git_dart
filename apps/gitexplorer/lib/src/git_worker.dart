@@ -299,6 +299,192 @@ class DeleteBranch extends GitRequest {
   const DeleteBranch(this.repositoryPath, this.name);
 }
 
+/// Checks out a local branch.
+///
+/// [force] discards uncommitted changes in the files the switch rewrites.
+/// Asked for explicitly, after a refusal that named them
+/// (`branching.a-checkout-that-would-lose-work-is-refused-first`).
+class CheckoutBranch extends GitRequest {
+  final String repositoryPath;
+  final String name;
+  final bool force;
+  const CheckoutBranch(this.repositoryPath, this.name, {this.force = false});
+}
+
+/// Creates a branch, and optionally checks it out.
+class CreateBranch extends GitRequest {
+  final String repositoryPath;
+  final String name;
+
+  /// A commit id, a local branch, or — with [fromRemote] — a remote branch
+  /// such as `origin/feature`. Null for HEAD.
+  final String? startPoint;
+
+  /// When set, [startPoint] names a remote branch, and the new branch follows
+  /// it (`branching.a-remote-branch-is-checked-out-as-a-local-one`).
+  final bool fromRemote;
+  final bool checkout;
+
+  const CreateBranch(
+    this.repositoryPath,
+    this.name, {
+    this.startPoint,
+    this.fromRemote = false,
+    this.checkout = false,
+  });
+}
+
+/// Merges a branch into the one checked out.
+class MergeBranch extends GitRequest {
+  final String repositoryPath;
+
+  /// A local branch, or with [fromRemote] a remote one such as `origin/main`.
+  final String source;
+  final bool fromRemote;
+
+  const MergeBranch(this.repositoryPath, this.source,
+      {this.fromRemote = false});
+}
+
+/// Abandons whichever merge, cherry-pick, revert or rebase stopped on
+/// conflicts.
+class AbortOperation extends GitRequest {
+  final String repositoryPath;
+  const AbortOperation(this.repositoryPath);
+}
+
+/// Finishes a cherry-pick, revert or rebase whose conflicts are resolved and
+/// staged (`rewriting.continuing-is-committing`). A merge is finished by an
+/// ordinary commit instead.
+class ContinueOperation extends GitRequest {
+  final String repositoryPath;
+
+  /// Replaces the stopped commit's message. Empty keeps it.
+  final String message;
+
+  const ContinueOperation(this.repositoryPath, this.message);
+}
+
+/// Applies the change a commit made on top of HEAD.
+class CherryPick extends GitRequest {
+  final String repositoryPath;
+  final String commitId;
+  const CherryPick(this.repositoryPath, this.commitId);
+}
+
+/// Undoes a commit with a new one.
+class RevertCommit extends GitRequest {
+  final String repositoryPath;
+  final String commitId;
+  const RevertCommit(this.repositoryPath, this.commitId);
+}
+
+/// Replays the current branch onto a local or remote branch.
+class RebaseOnto extends GitRequest {
+  final String repositoryPath;
+  final String onto;
+  final bool fromRemote;
+  const RebaseOnto(this.repositoryPath, this.onto, {this.fromRemote = false});
+}
+
+/// The commits a branch has that HEAD does not, newest first
+/// (`rewriting.cherry-picking-starts-from-the-branch`).
+class LoadUnmerged extends GitRequest {
+  final String repositoryPath;
+  final String branch;
+  final bool fromRemote;
+  final int limit;
+
+  const LoadUnmerged(
+    this.repositoryPath,
+    this.branch, {
+    this.fromRemote = false,
+    this.limit = 100,
+  });
+}
+
+/// Puts the working tree's changes aside.
+class SaveStash extends GitRequest {
+  final String repositoryPath;
+
+  /// Empty for git's own "WIP on <branch>" message.
+  final String message;
+  final bool includeUntracked;
+
+  const SaveStash(
+    this.repositoryPath, {
+    this.message = '',
+    this.includeUntracked = false,
+  });
+}
+
+/// Brings a stash back, and with [pop] drops it once it applied cleanly.
+class ApplyStash extends GitRequest {
+  final String repositoryPath;
+  final int index;
+  final bool pop;
+  const ApplyStash(this.repositoryPath, this.index, {this.pop = false});
+}
+
+class DropStash extends GitRequest {
+  final String repositoryPath;
+  final int index;
+  const DropStash(this.repositoryPath, this.index);
+}
+
+/// Records what a branch follows, or forgets it when [upstream] is null.
+class SetUpstream extends GitRequest {
+  final String repositoryPath;
+  final String branch;
+
+  /// A remote branch by short name, as in `origin/main`.
+  final String? upstream;
+
+  const SetUpstream(this.repositoryPath, this.branch, this.upstream);
+}
+
+class CreateTag extends GitRequest {
+  final String repositoryPath;
+  final String name;
+
+  /// A commit id, or null for HEAD.
+  final String? at;
+
+  /// Makes an annotated tag. Null or empty makes a lightweight one.
+  final String? message;
+
+  const CreateTag(this.repositoryPath, this.name, {this.at, this.message});
+}
+
+class DeleteTag extends GitRequest {
+  final String repositoryPath;
+  final String name;
+  const DeleteTag(this.repositoryPath, this.name);
+}
+
+class RenameRemote extends GitRequest {
+  final String repositoryPath;
+  final String from;
+  final String to;
+  const RenameRemote(this.repositoryPath, this.from, this.to);
+}
+
+/// Puts one tracked file back to how HEAD has it, in the index and on disk
+/// (`branching.discarding-goes-back-to-head`).
+class DiscardChanges extends GitRequest {
+  final String repositoryPath;
+  final String path;
+  const DiscardChanges(this.repositoryPath, this.path);
+}
+
+/// Moves the current branch to [commitId].
+class ResetBranch extends GitRequest {
+  final String repositoryPath;
+  final String commitId;
+  final ResetStrength strength;
+  const ResetBranch(this.repositoryPath, this.commitId, this.strength);
+}
+
 /// Everything the settings screen shows: the value in force for each key it
 /// knows, and which file it came from.
 class LoadSettings extends GitRequest {
@@ -379,6 +565,24 @@ class GitWorker {
         CreateEntry() => _create(request),
         RenameBranch() => _renameBranch(request),
         DeleteBranch() => _deleteBranch(request),
+        CheckoutBranch() => _checkoutBranch(request),
+        CreateBranch() => _createBranch(request),
+        MergeBranch() => _mergeBranch(request),
+        AbortOperation() => _abort(request),
+        ContinueOperation() => _continue(request),
+        CherryPick() => _cherryPick(request),
+        RevertCommit() => _revert(request),
+        RebaseOnto() => _rebase(request),
+        LoadUnmerged() => _unmerged(request),
+        SaveStash() => _saveStash(request),
+        ApplyStash() => _applyStash(request),
+        DropStash() => _dropStash(request),
+        SetUpstream() => _setUpstream(request),
+        CreateTag() => _createTag(request),
+        DeleteTag() => _deleteTag(request),
+        RenameRemote() => _renameRemote(request),
+        DiscardChanges() => _discard(request),
+        ResetBranch() => _reset(request),
         LoadSettings() => _settings(request),
         WriteSetting() => _writeSetting(request),
         LoadRemotes() => _remotes(request),
@@ -445,6 +649,8 @@ class GitWorker {
 
     final head = repo.headCommit;
     final status = repo.isBare ? null : repo.status();
+    final branches = repo.refs.branches.map((r) => r.shortName).toList();
+    final stopped = _stoppedIn(repo);
 
     return RepositorySummary(
       path: request.path,
@@ -455,13 +661,108 @@ class GitWorker {
       headSummary: head?.summary,
       headWhen: head?.committer.utc,
       headAuthor: head?.author.name,
-      changedCount:
-          status == null ? 0 : status.entries.where((e) => !e.isUntracked).length,
+      changedCount: status == null
+          ? 0
+          : status.entries.where((e) => !e.isUntracked).length,
       untrackedCount: status?.untracked.length ?? 0,
-      branches: repo.refs.branches.map((r) => r.shortName).toList(),
+      branches: branches,
       tags: repo.refs.tags.map((r) => r.shortName).toList(),
+      remoteBranches: [
+        for (final ref in repo.refs.remoteBranches)
+          if (ref.target is! git.SymbolicRef)
+            ref.path.substring('refs/remotes/'.length),
+      ],
+      upstreams: {
+        for (final branch in branches)
+          if (_upstreamOf(repo, branch) case final upstream?) branch: upstream,
+      },
+      inProgress: stopped?.kind,
+      preparedMessage: stopped?.message,
+      inProgressCommit: stopped?.commit,
+      rebaseRemaining: stopped?.remaining ?? 0,
+      stashes: repo.isBare
+          ? const []
+          : [
+              for (final entry in git.stashList(repo))
+                StashData(
+                  index: entry.index,
+                  message: entry.message,
+                  commit: entry.commit.hex,
+                ),
+            ],
     );
   }
+
+  /// What stopped on conflicts and is waiting for a person, if anything.
+  ///
+  /// A cherry-pick, revert or rebase is recorded by the sequencer; a merge by
+  /// `MERGE_HEAD`. Git never has both at once, and neither is offered here
+  /// while the other is under way.
+  ({InProgress kind, String? message, String? commit, int remaining})?
+      _stoppedIn(git.Repository repo) {
+    final state = git.SequencerState.read(repo.gitDirectory);
+    if (state != null) {
+      final kind = switch (state.operation) {
+        git.SequencerOperation.cherryPick => InProgress.cherryPick,
+        git.SequencerOperation.revert => InProgress.revert,
+        git.SequencerOperation.rebase => InProgress.rebase,
+      };
+      final source = repo.objects.contains(state.current)
+          ? repo.objects.readTyped<git.Commit>(state.current)
+          : null;
+      return (
+        kind: kind,
+        // A cherry-pick or revert writes the message it would commit with;
+        // a rebase keeps the stopped commit's own.
+        message: kind == InProgress.rebase
+            ? source?.message
+            : repo.mergeMessage ?? source?.message,
+        commit: source == null
+            ? state.current.hex.substring(0, 8)
+            : '${state.current.hex.substring(0, 8)} ${source.summary}',
+        remaining: state.remaining.length,
+      );
+    }
+    if (repo.isMerging) {
+      return (
+        kind: InProgress.merge,
+        message: repo.mergeMessage,
+        commit: null,
+        remaining: 0,
+      );
+    }
+    return null;
+  }
+
+  /// Refuses while something else is stopped on conflicts
+  /// (`rewriting.one-thing-in-progress-at-a-time`).
+  void _requireNothingInProgress(git.Repository repo) {
+    final stopped = _stoppedIn(repo);
+    if (stopped == null) return;
+    throw StateError(
+      'a ${stopped.kind.label} is in progress; finish or abort it first',
+    );
+  }
+
+  /// What [branch] follows, by the short name the user would recognise.
+  ///
+  /// Read from the config rather than through `trackingFor`, which also counts
+  /// ahead and behind — a walk of both histories per branch, for a name.
+  String? _upstreamOf(git.Repository repo, String branch) {
+    final upstream = git.upstreamOf(repo.config, branch);
+    if (upstream == null) return null;
+    if (upstream.remote == '.') {
+      return upstream.ref.replaceFirst('refs/heads/', '');
+    }
+    final tracking =
+        repo.remotes.named(upstream.remote)?.trackingRefFor(upstream.ref) ??
+            'refs/remotes/${upstream.remote}/'
+                '${upstream.ref.replaceFirst('refs/heads/', '')}';
+    return tracking.replaceFirst('refs/remotes/', '');
+  }
+
+  RepositorySummary _summaryOf(String path) =>
+      _open(OpenRepository(path, p.basename(p.normalize(path))));
 
   RepositorySummary _initialise(InitialiseRepository request) {
     if (git.gitFs.file(request.path).existsSync()) {
@@ -492,7 +793,8 @@ class GitWorker {
       throw StateError('${request.path} is already inside a repository');
     }
 
-    git.Repository.init(request.path, defaultBranch: _defaultBranch(request.path))
+    git.Repository.init(request.path,
+            defaultBranch: _defaultBranch(request.path))
         .close();
     return _open(OpenRepository(request.path, request.name));
   }
@@ -527,6 +829,435 @@ class GitWorker {
       request.repositoryPath,
       p.basename(p.normalize(request.repositoryPath)),
     ));
+  }
+
+  CheckoutOutcome _checkoutBranch(CheckoutBranch request) {
+    final repo = _repository(request.repositoryPath);
+    return _switchTo(
+      repo,
+      request.repositoryPath,
+      request.name,
+      force: request.force,
+    );
+  }
+
+  CheckoutOutcome _switchTo(
+    git.Repository repo,
+    String path,
+    String branch, {
+    bool force = false,
+  }) {
+    _requireNothingInProgress(repo);
+    if (repo.refs.read('refs/heads/$branch') == null) {
+      throw StateError('no branch named $branch');
+    }
+    try {
+      final result = repo.checkout('refs/heads/$branch', force: force);
+      _statuses.remove(path);
+      return CheckoutOutcome(
+        summary: _summaryOf(path),
+        degraded: result.degraded,
+      );
+    } on git.CheckoutConflictException catch (conflict) {
+      return CheckoutOutcome(
+        summary: _summaryOf(path),
+        blockedBy: conflict.paths,
+      );
+    }
+  }
+
+  CheckoutOutcome _createBranch(CreateBranch request) {
+    final repo = _repository(request.repositoryPath);
+    final start = request.startPoint;
+
+    final git.ObjectId? at;
+    if (start == null) {
+      at = null;
+    } else if (request.fromRemote) {
+      at = repo.refs.resolve('refs/remotes/$start');
+    } else {
+      at = repo.refs.resolve('refs/heads/$start') ?? repo.resolve(start);
+    }
+    if (start != null && at == null) {
+      throw StateError('$start names nothing here');
+    }
+
+    repo.createBranch(request.name, at: at);
+
+    if (request.fromRemote) {
+      final upstream = _remoteRefFor(repo, 'refs/remotes/$start');
+      if (upstream != null) {
+        repo.setUpstream(request.name, upstream.remote, upstream.ref);
+      }
+    }
+
+    if (!request.checkout) {
+      return CheckoutOutcome(summary: _summaryOf(request.repositoryPath));
+    }
+    return _switchTo(repo, request.repositoryPath, request.name);
+  }
+
+  /// The remote, and the ref on it, that [trackingRef] is the local copy of:
+  /// the fetch refspecs read backwards.
+  ({String remote, String ref})? _remoteRefFor(
+    git.Repository repo,
+    String trackingRef,
+  ) {
+    for (final remote in repo.remotes.list()) {
+      for (final spec in remote.effectiveFetchSpecs) {
+        if (spec.isPattern) {
+          final destination =
+              spec.destination.substring(0, spec.destination.length - 1);
+          if (!trackingRef.startsWith(destination)) continue;
+          final source = spec.source.substring(0, spec.source.length - 1);
+          return (
+            remote: remote.name,
+            ref: '$source${trackingRef.substring(destination.length)}',
+          );
+        }
+        if (spec.destination == trackingRef) {
+          return (remote: remote.name, ref: spec.source);
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Refuses while tracked files have changes that are not committed.
+  ///
+  /// A merge, a cherry-pick, a revert, a rebase and a stash all write files
+  /// straight into the working tree as though it matched HEAD, and would
+  /// write over those changes. Git refuses the same way, per file; here it is
+  /// the whole tree, which is stricter and never loses anything
+  /// (`rewriting.a-clean-tree-first`).
+  void _requireClean(git.Repository repo, String what) {
+    final changed = [
+      for (final entry in repo.status().entries)
+        if (!entry.isUntracked) entry.path,
+    ];
+    if (changed.isEmpty) return;
+    throw StateError(
+      'commit, stash or discard the changes first, which $what would write '
+      'over: ${changed.take(5).join(', ')}'
+      '${changed.length > 5 ? ' and ${changed.length - 5} more' : ''}',
+    );
+  }
+
+  OperationResult _mergeBranch(MergeBranch request) {
+    final repo = _repository(request.repositoryPath);
+    final refPath = request.fromRemote
+        ? 'refs/remotes/${request.source}'
+        : 'refs/heads/${request.source}';
+    final theirs = repo.refs.resolve(refPath);
+    if (theirs == null) throw StateError('no branch named ${request.source}');
+    if (repo.refs.currentBranch == refPath) {
+      throw StateError('a branch cannot be merged into itself');
+    }
+    _requireNothingInProgress(repo);
+    _requireClean(repo, 'a merge');
+
+    try {
+      final merged = git.merge(
+        repo,
+        theirs,
+        message: request.fromRemote
+            ? "Merge remote-tracking branch '${request.source}'\n"
+            : "Merge branch '${request.source}'\n",
+      );
+      return OperationResult(
+        operation: Operation.merge,
+        subject: request.source,
+        outcome: merged.outcome.name,
+        conflicts: merged.conflicts,
+        commit: merged.commit?.hex,
+      );
+    } on git.CheckoutConflictException catch (conflict) {
+      return OperationResult(
+        operation: Operation.merge,
+        subject: request.source,
+        error: '$conflict',
+      );
+    } finally {
+      _statuses.remove(request.repositoryPath);
+    }
+  }
+
+  RepositorySummary _abort(AbortOperation request) {
+    final repo = _repository(request.repositoryPath);
+    switch (_stoppedIn(repo)?.kind) {
+      case InProgress.merge:
+        repo.abortMerge();
+      case InProgress.cherryPick || InProgress.revert:
+        git.abortApply(repo);
+      case InProgress.rebase:
+        git.abortRebase(repo);
+      case null:
+        throw StateError('nothing is in progress to abort');
+    }
+    _statuses.remove(request.repositoryPath);
+    return _summaryOf(request.repositoryPath);
+  }
+
+  OperationResult _continue(ContinueOperation request) {
+    final repo = _repository(request.repositoryPath);
+    final stopped = _stoppedIn(repo);
+    final message = request.message.trim().isEmpty ? null : request.message;
+    try {
+      switch (stopped?.kind) {
+        case InProgress.cherryPick || InProgress.revert:
+          final id = git.continueApply(repo, message: message);
+          return OperationResult(
+            operation: Operation.continueOperation,
+            subject: stopped!.kind.label,
+            outcome: 'applied',
+            commit: id.hex,
+          );
+        case InProgress.rebase:
+          final result = git.continueRebase(repo, message: message);
+          return OperationResult(
+            operation: Operation.continueOperation,
+            subject: stopped!.kind.label,
+            outcome: result.outcome.name,
+            conflicts: result.conflicts,
+            commit: result.head?.hex,
+            replayed: result.replayed.length,
+          );
+        case InProgress.merge:
+          throw StateError('a merge is finished by committing');
+        case null:
+          throw StateError('nothing is in progress to continue');
+      }
+    } finally {
+      _statuses.remove(request.repositoryPath);
+    }
+  }
+
+  /// The commit [commitId] names, refused when it is a merge: which side of
+  /// it to take is a choice this does not offer yet
+  /// (`rewriting.a-merge-is-not-reverted-here`).
+  git.Commit _singleParentCommit(git.Repository repo, String commitId) {
+    final id = repo.resolve(commitId);
+    if (id == null) throw StateError('$commitId names nothing here');
+    final commit = repo.peel(id);
+    if (commit is! git.Commit) throw StateError('$commitId is not a commit');
+    if (commit.parents.length > 1) {
+      throw StateError('${commitId.substring(0, 8)} is a merge, and applying '
+          'one needs a choice of side that is not offered here yet');
+    }
+    return commit;
+  }
+
+  OperationResult _cherryPick(CherryPick request) {
+    final repo = _repository(request.repositoryPath);
+    _requireNothingInProgress(repo);
+    _requireClean(repo, 'a cherry-pick');
+    final commit = _singleParentCommit(repo, request.commitId);
+    try {
+      final result = git.cherryPick(repo, commit.id);
+      return OperationResult(
+        operation: Operation.cherryPick,
+        subject: '${commit.id.hex.substring(0, 8)} ${commit.summary}',
+        outcome: result.outcome.name,
+        conflicts: result.conflicts,
+        commit: result.commit?.hex,
+      );
+    } finally {
+      _statuses.remove(request.repositoryPath);
+    }
+  }
+
+  OperationResult _revert(RevertCommit request) {
+    final repo = _repository(request.repositoryPath);
+    _requireNothingInProgress(repo);
+    _requireClean(repo, 'a revert');
+    final commit = _singleParentCommit(repo, request.commitId);
+    try {
+      final result = git.revert(repo, commit.id);
+      return OperationResult(
+        operation: Operation.revert,
+        subject: '${commit.id.hex.substring(0, 8)} ${commit.summary}',
+        outcome: result.outcome.name,
+        conflicts: result.conflicts,
+        commit: result.commit?.hex,
+      );
+    } finally {
+      _statuses.remove(request.repositoryPath);
+    }
+  }
+
+  OperationResult _rebase(RebaseOnto request) {
+    final repo = _repository(request.repositoryPath);
+    final refPath = request.fromRemote
+        ? 'refs/remotes/${request.onto}'
+        : 'refs/heads/${request.onto}';
+    final onto = repo.refs.resolve(refPath);
+    if (onto == null) throw StateError('no branch named ${request.onto}');
+    if (repo.refs.currentBranch == refPath) {
+      throw StateError('a branch cannot be rebased onto itself');
+    }
+    _requireNothingInProgress(repo);
+    _requireClean(repo, 'a rebase');
+    try {
+      final result = git.rebase(repo, onto);
+      return OperationResult(
+        operation: Operation.rebase,
+        subject: request.onto,
+        outcome: result.outcome.name,
+        conflicts: result.conflicts,
+        commit: result.head?.hex,
+        replayed: result.replayed.length,
+      );
+    } finally {
+      _statuses.remove(request.repositoryPath);
+    }
+  }
+
+  List<CommitData> _unmerged(LoadUnmerged request) {
+    final repo = _repository(request.repositoryPath);
+    final tip = repo.refs.resolve(request.fromRemote
+        ? 'refs/remotes/${request.branch}'
+        : 'refs/heads/${request.branch}');
+    if (tip == null) throw StateError('no branch named ${request.branch}');
+
+    // Everything HEAD already has is marked seen before the walk starts, so
+    // the walk stops wherever the branch joins this one.
+    final head = repo.headId;
+    final here = head == null
+        ? <git.ObjectId>{}
+        : {
+            for (final commit in repo.log(start: head)) commit.id,
+          };
+    return [
+      for (final commit
+          in repo.log(start: tip, limit: request.limit, excluding: here))
+        _toData(commit),
+    ];
+  }
+
+  RepositorySummary _saveStash(SaveStash request) {
+    final repo = _repository(request.repositoryPath);
+    _requireNothingInProgress(repo);
+    final message = request.message.trim();
+    final saved = git.stashSave(
+      repo,
+      message: message.isEmpty ? null : message,
+      includeUntracked: request.includeUntracked,
+    );
+    if (saved == null) throw StateError('there are no changes to stash');
+    _statuses.remove(request.repositoryPath);
+    return _summaryOf(request.repositoryPath);
+  }
+
+  OperationResult _applyStash(ApplyStash request) {
+    final repo = _repository(request.repositoryPath);
+    _requireNothingInProgress(repo);
+    _requireClean(repo, 'applying a stash');
+    try {
+      final outcome = request.pop
+          ? git.stashPop(repo, index: request.index)
+          : git.stashApply(repo, index: request.index);
+      return OperationResult(
+        operation: request.pop ? Operation.popStash : Operation.applyStash,
+        subject: 'stash@{${request.index}}',
+        outcome: outcome.name,
+        conflicts: outcome == git.MergeOutcome.conflicted
+            ? [
+                for (final entry in repo.status().entries)
+                  if (entry.isConflicted) entry.path,
+              ]
+            : const [],
+      );
+    } finally {
+      _statuses.remove(request.repositoryPath);
+    }
+  }
+
+  RepositorySummary _dropStash(DropStash request) {
+    git.stashDrop(_repository(request.repositoryPath), index: request.index);
+    return _summaryOf(request.repositoryPath);
+  }
+
+  RepositorySummary _setUpstream(SetUpstream request) {
+    final repo = _repository(request.repositoryPath);
+    final upstream = request.upstream;
+    if (upstream == null) {
+      repo.unsetUpstream(request.branch);
+    } else {
+      final target = _remoteRefFor(repo, 'refs/remotes/$upstream');
+      if (target == null) {
+        throw StateError('no remote fetches into $upstream');
+      }
+      repo.setUpstream(request.branch, target.remote, target.ref);
+    }
+    return _summaryOf(request.repositoryPath);
+  }
+
+  RepositorySummary _createTag(CreateTag request) {
+    final repo = _repository(request.repositoryPath);
+    final at = request.at == null ? null : repo.resolve(request.at!);
+    if (request.at != null && at == null) {
+      throw StateError('${request.at} names nothing here');
+    }
+    final message = request.message?.trim();
+    repo.createTag(
+      request.name,
+      at: at,
+      message: message == null || message.isEmpty ? null : message,
+    );
+    return _summaryOf(request.repositoryPath);
+  }
+
+  RepositorySummary _deleteTag(DeleteTag request) {
+    _repository(request.repositoryPath).deleteTag(request.name);
+    return _summaryOf(request.repositoryPath);
+  }
+
+  StagingArea _discard(DiscardChanges request) {
+    // Resolved for its checks alone: a discard writes to the working tree,
+    // and gets the same refusals any other write does.
+    _resolveForWriting(request.repositoryPath, request.path);
+    final repo = _repository(request.repositoryPath);
+    final head = repo.headId;
+    final tree = head == null ? null : repo.treeOf(head);
+    final entry = tree == null ? null : repo.lookup(tree, request.path);
+    if (entry == null || entry.mode.isTree) {
+      // Going back to HEAD would delete it, which is deleting — not what
+      // this action says it does.
+      throw StateError(
+        '${request.path} is not a file in HEAD, so there is nothing to go '
+        'back to',
+      );
+    }
+    git.restorePath(repo, request.path, worktree: true, staged: true);
+    _statuses.remove(request.repositoryPath);
+    return _staging(LoadStaging(request.repositoryPath));
+  }
+
+  RepositorySummary _reset(ResetBranch request) {
+    final repo = _repository(request.repositoryPath);
+    final id = repo.resolve(request.commitId);
+    if (id == null) throw StateError('${request.commitId} names nothing here');
+
+    final stopped = _stoppedIn(repo)?.kind;
+    if (stopped != null && stopped != InProgress.merge) {
+      throw StateError('a ${stopped.label} is in progress; abort it first');
+    }
+    final merging = stopped == InProgress.merge;
+    if (merging && request.strength == ResetStrength.soft) {
+      // Git refuses this too: the merge result would stay staged with
+      // nothing left to say it was a merge.
+      throw StateError(
+        'a merge is in progress; abort it, or reset with another strength',
+      );
+    }
+    git.reset(
+      repo,
+      id,
+      mode: git.ResetMode.values.byName(request.strength.name),
+    );
+    if (merging) repo.clearMergeState();
+    _statuses.remove(request.repositoryPath);
+    return _summaryOf(request.repositoryPath);
   }
 
   // ---- settings -----------------------------------------------------------
@@ -578,7 +1309,8 @@ class GitWorker {
   List<RemoteData> _remotes(LoadRemotes request) {
     final repo = _repository(request.repositoryPath);
     final branch = repo.refs.currentBranch?.replaceFirst('refs/heads/', '');
-    final localTip = branch == null ? null : repo.refs.resolve('refs/heads/$branch');
+    final localTip =
+        branch == null ? null : repo.refs.resolve('refs/heads/$branch');
 
     return [
       for (final remote in repo.remotes.list())
@@ -641,9 +1373,14 @@ class GitWorker {
   }
 
   List<RemoteData> _addRemote(AddRemote request) {
+    _repository(request.repositoryPath).remotes.add(request.name, request.url);
+    return _remotes(LoadRemotes(request.repositoryPath));
+  }
+
+  List<RemoteData> _renameRemote(RenameRemote request) {
     _repository(request.repositoryPath)
         .remotes
-        .add(request.name, request.url);
+        .rename(request.from, request.to);
     return _remotes(LoadRemotes(request.repositoryPath));
   }
 
@@ -821,6 +1558,8 @@ class GitWorker {
     }
 
     try {
+      _requireNothingInProgress(repo);
+      _requireClean(repo, 'a merge');
       final merged = await git.mergeTrackingRef(repo, tracking);
       _statuses.remove(request.repositoryPath);
       return PullOutcome(
@@ -922,9 +1661,8 @@ class GitWorker {
     final identity = repo.identityFromConfig();
 
     return StagingArea(
-      identity: identity == null
-          ? null
-          : '${identity.name} <${identity.email}>',
+      identity:
+          identity == null ? null : '${identity.name} <${identity.email}>',
       rows: [
         for (final entry in repo.status().entries)
           StatusRow(
@@ -954,6 +1692,13 @@ class GitWorker {
 
   CommitData _writeCommit(CommitStaged request) {
     final repo = _repository(request.repositoryPath);
+    final stopped = _stoppedIn(repo)?.kind;
+    if (stopped != null && stopped != InProgress.merge) {
+      // An ordinary commit here would record the change and leave the
+      // operation marked as under way.
+      throw StateError('a ${stopped.label} is in progress; continue it '
+          'rather than committing');
+    }
     final id = repo.commitIndex(message: request.message);
     _statuses.remove(request.repositoryPath);
     return _toData(repo.objects.readTyped<git.Commit>(id));
@@ -977,7 +1722,8 @@ class GitWorker {
       throw StateError('a name is required');
     }
 
-    final absolute = p.normalize(p.join(root, path.replaceAll('/', p.separator)));
+    final absolute =
+        p.normalize(p.join(root, path.replaceAll('/', p.separator)));
     if (!p.isWithin(root, absolute)) {
       throw StateError('$path is outside the working tree');
     }
@@ -1023,8 +1769,8 @@ class GitWorker {
       name: p.basename(absolute),
       path: request.path,
       kind: EntryKind.file,
-      state: _status(_repository(request.repositoryPath), request.repositoryPath)[
-              request.path] ??
+      state: _status(_repository(request.repositoryPath),
+              request.repositoryPath)[request.path] ??
           FileState.clean,
       size: stat.size,
     );
@@ -1054,8 +1800,8 @@ class GitWorker {
       name: p.basename(absolute),
       path: request.path,
       kind: request.kind,
-      state: _status(_repository(request.repositoryPath), request.repositoryPath)[
-              request.path] ??
+      state: _status(_repository(request.repositoryPath),
+              request.repositoryPath)[request.path] ??
           FileState.untracked,
       size: request.kind == EntryKind.file ? 0 : null,
     );
@@ -1119,7 +1865,8 @@ class GitWorker {
     // Ignored paths are not in the status at all, so they are matched here —
     // otherwise a file just added to .gitignore would look identical to a
     // clean tracked one.
-    final rules = git.loadIgnoreRules(root, repo.gitDirectory, config: repo.config);
+    final rules =
+        git.loadIgnoreRules(root, repo.gitDirectory, config: repo.config);
     final entries = <EntryData>[];
 
     for (final entry in directory.listSync(followLinks: false)) {
@@ -1321,12 +2068,13 @@ class GitWorker {
 
     List<int> after = const [];
     if (root != null) {
-      final file =
-          git.gitFs.file(p.join(root, request.path.replaceAll('/', p.separator)));
+      final file = git.gitFs
+          .file(p.join(root, request.path.replaceAll('/', p.separator)));
       if (file.existsSync()) after = file.readAsBytesSync();
     }
 
-    final diff = git.diffText(Uint8List.fromList(before), Uint8List.fromList(after));
+    final diff =
+        git.diffText(Uint8List.fromList(before), Uint8List.fromList(after));
     return _renderDiff(request.path, diff, 'HEAD and the working tree');
   }
 
@@ -1456,10 +2204,8 @@ class GitWorker {
     final id = repo.resolve(request.commitId);
     if (id == null) throw StateError('${request.commitId} names nothing here');
 
-    final change = repo
-        .changesIn(id)
-        .where((c) => c.path == request.path)
-        .firstOrNull;
+    final change =
+        repo.changesIn(id).where((c) => c.path == request.path).firstOrNull;
     if (change == null) {
       return FileDiff(
         path: request.path,
@@ -1559,8 +2305,7 @@ class GitService {
     void Function(T value)? beforePersist,
     void Function(String)? onProgress,
   }) async {
-    final value =
-        await _transport.send(request, onProgress: onProgress) as T;
+    final value = await _transport.send(request, onProgress: onProgress) as T;
     // A repository that did not exist before this call has to be registered
     // before the persist below, or the very first save after creating one
     // finds nothing to save it under - which is what silently dropped a
@@ -1692,6 +2437,113 @@ class GitService {
   Future<RepositorySummary> deleteBranch(String repository, String name) =>
       _ask(DeleteBranch(repository, name));
 
+  Future<CheckoutOutcome> checkoutBranch(
+    String repository,
+    String name, {
+    bool force = false,
+  }) =>
+      _ask(CheckoutBranch(repository, name, force: force));
+
+  Future<CheckoutOutcome> createBranch(
+    String repository,
+    String name, {
+    String? startPoint,
+    bool fromRemote = false,
+    bool checkout = false,
+  }) =>
+      _ask(CreateBranch(
+        repository,
+        name,
+        startPoint: startPoint,
+        fromRemote: fromRemote,
+        checkout: checkout,
+      ));
+
+  Future<OperationResult> mergeBranch(
+    String repository,
+    String source, {
+    bool fromRemote = false,
+  }) =>
+      _ask(MergeBranch(repository, source, fromRemote: fromRemote));
+
+  Future<RepositorySummary> abortOperation(String repository) =>
+      _ask(AbortOperation(repository));
+
+  Future<OperationResult> continueOperation(
+    String repository,
+    String message,
+  ) =>
+      _ask(ContinueOperation(repository, message));
+
+  Future<OperationResult> cherryPick(String repository, String commitId) =>
+      _ask(CherryPick(repository, commitId));
+
+  Future<OperationResult> revertCommit(String repository, String commitId) =>
+      _ask(RevertCommit(repository, commitId));
+
+  Future<OperationResult> rebaseOnto(
+    String repository,
+    String onto, {
+    bool fromRemote = false,
+  }) =>
+      _ask(RebaseOnto(repository, onto, fromRemote: fromRemote));
+
+  Future<List<CommitData>> unmerged(
+    String repository,
+    String branch, {
+    bool fromRemote = false,
+  }) =>
+      _ask(LoadUnmerged(repository, branch, fromRemote: fromRemote));
+
+  Future<RepositorySummary> saveStash(
+    String repository, {
+    String message = '',
+    bool includeUntracked = false,
+  }) =>
+      _ask(SaveStash(
+        repository,
+        message: message,
+        includeUntracked: includeUntracked,
+      ));
+
+  Future<OperationResult> applyStash(
+    String repository,
+    int index, {
+    bool pop = false,
+  }) =>
+      _ask(ApplyStash(repository, index, pop: pop));
+
+  Future<RepositorySummary> dropStash(String repository, int index) =>
+      _ask(DropStash(repository, index));
+
+  Future<RepositorySummary> setUpstream(
+    String repository,
+    String branch,
+    String? upstream,
+  ) =>
+      _ask(SetUpstream(repository, branch, upstream));
+
+  Future<RepositorySummary> createTag(
+    String repository,
+    String name, {
+    String? at,
+    String? message,
+  }) =>
+      _ask(CreateTag(repository, name, at: at, message: message));
+
+  Future<RepositorySummary> deleteTag(String repository, String name) =>
+      _ask(DeleteTag(repository, name));
+
+  Future<StagingArea> discardChanges(String repository, String path) =>
+      _ask(DiscardChanges(repository, path));
+
+  Future<RepositorySummary> resetBranch(
+    String repository,
+    String commitId,
+    ResetStrength strength,
+  ) =>
+      _ask(ResetBranch(repository, commitId, strength));
+
   Future<List<SettingValue>> settings(
     String repository,
     List<String> keys,
@@ -1715,6 +2567,13 @@ class GitService {
     String url,
   ) =>
       _ask(AddRemote(repository, name, url));
+
+  Future<List<RemoteData>> renameRemote(
+    String repository,
+    String from,
+    String to,
+  ) =>
+      _ask(RenameRemote(repository, from, to));
 
   Future<List<RemoteData>> removeRemote(String repository, String name) =>
       _ask(RemoveRemote(repository, name));

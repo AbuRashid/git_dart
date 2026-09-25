@@ -226,6 +226,9 @@ class _RepositoryDetail extends StatelessWidget {
           ],
         ),
         _Facts(summary: summary),
+        if (summary.busy) _InProgressBanner(state: state, summary: summary),
+        if (state.lastOperation case final result?)
+          _OperationReport(state: state, result: result, into: summary.branch),
         const Divider(height: 1),
         // History leads: it is what a repository is mostly looked at for.
         // Each tab owns its own controls — the commit box belongs to Staged
@@ -268,6 +271,11 @@ class _RepositoryDetail extends StatelessWidget {
                                 onTap: () => state.selectCommit(
                                   repositoryPath,
                                   commit.id,
+                                ),
+                                actions: _CommitActions(
+                                  state: state,
+                                  summary: summary,
+                                  commit: commit,
                                 ),
                               ),
                           ],
@@ -383,7 +391,7 @@ class _Heading extends StatelessWidget {
   }
 }
 
-/// The branches, and what can be done to them.
+/// The branches and tags, and what can be done to them.
 class _Branches extends StatelessWidget {
   final ExplorerState state;
   final String repositoryPath;
@@ -398,37 +406,83 @@ class _Branches extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final current = summary.branch;
+    final hasCommits = summary.headId != null;
+
+    Widget hint(String text) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Text(
+            text,
+            style: theme.textTheme.bodyMedium
+                ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        );
+
+    // Merging or rebasing a detached HEAD, or while something else is
+    // stopped, is not offered: the first has no branch to move and the
+    // second has to be finished first.
+    final canMerge = current != null && !summary.detached && !summary.busy;
 
     return Column(
       children: [
-        _Heading(label: 'Branches', count: summary.branches.length),
+        _Heading(
+          label: 'Branches',
+          count: summary.branches.length,
+          trailing: TextButton.icon(
+            onPressed: hasCommits
+                ? () => _newBranch(context, state, repositoryPath)
+                : null,
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('New branch'),
+          ),
+        ),
         if (summary.branches.isEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Text(
-              'No branches yet — the first commit makes one.',
-              style: theme.textTheme.bodyMedium
-                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-            ),
-          )
+          hint('No branches yet — the first commit makes one.')
         else
           for (final branch in summary.branches)
             ListTile(
               dense: true,
               leading: Icon(
-                branch == summary.branch
+                branch == current
                     ? Icons.radio_button_checked
                     : Icons.call_split,
-                color:
-                    branch == summary.branch ? theme.colorScheme.primary : null,
+                color: branch == current ? theme.colorScheme.primary : null,
               ),
               title: Text(branch),
-              subtitle:
-                  branch == summary.branch ? const Text('checked out') : null,
+              subtitle: switch ((
+                branch == current,
+                summary.upstreams[branch]
+              )) {
+                (true, null) => const Text('checked out'),
+                (true, final upstream?) =>
+                  Text('checked out · follows $upstream'),
+                (false, final upstream?) => Text('follows $upstream'),
+                (false, null) => null,
+              },
+              onTap: branch == current
+                  ? null
+                  : () => _checkout(context, state, repositoryPath, branch),
               trailing: PopupMenuButton<String>(
                 tooltip: 'Branch actions',
                 onSelected: (choice) async {
                   switch (choice) {
+                    case 'checkout':
+                      await _checkout(context, state, repositoryPath, branch);
+                    case 'merge':
+                      await _merge(context, state, repositoryPath, branch,
+                          into: current!);
+                    case 'rebase':
+                      await _rebase(context, state, repositoryPath, branch,
+                          current: current!);
+                    case 'pick':
+                      await _pickFrom(context, state, repositoryPath, branch,
+                          current: current ?? 'HEAD');
+                    case 'branch':
+                      await _newBranch(context, state, repositoryPath,
+                          startPoint: branch);
+                    case 'upstream':
+                      await _chooseUpstream(
+                          context, state, repositoryPath, summary, branch);
                     case 'rename':
                       await _renameBranch(
                         context,
@@ -446,13 +500,142 @@ class _Branches extends StatelessWidget {
                   }
                 },
                 itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: 'checkout',
+                    enabled: branch != current && !summary.busy,
+                    child: const Text('Switch to'),
+                  ),
+                  PopupMenuItem(
+                    value: 'merge',
+                    enabled: canMerge && branch != current,
+                    child: Text(
+                      current == null ? 'Merge' : 'Merge into $current',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'rebase',
+                    enabled: canMerge && branch != current,
+                    child: Text(
+                      current == null
+                          ? 'Rebase onto this…'
+                          : 'Rebase $current onto this…',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'pick',
+                    enabled: hasCommits && !summary.busy && branch != current,
+                    child: const Text('Cherry-pick a commit…'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'branch',
+                    child: Text('New branch from here…'),
+                  ),
+                  PopupMenuItem(
+                    value: 'upstream',
+                    enabled: summary.remoteBranches.isNotEmpty ||
+                        summary.upstreams.containsKey(branch),
+                    child: const Text('Follow a remote branch…'),
+                  ),
+                  const PopupMenuDivider(),
                   const PopupMenuItem(value: 'rename', child: Text('Rename…')),
                   PopupMenuItem(
                     value: 'delete',
                     // The checked-out branch cannot go; git refuses it too.
-                    enabled: branch != summary.branch,
+                    enabled: branch != current,
                     child: const Text('Delete…'),
                   ),
+                ],
+              ),
+            ),
+        if (summary.remoteBranches.isNotEmpty) ...[
+          _Heading(
+            label: 'Remote branches',
+            count: summary.remoteBranches.length,
+          ),
+          for (final remoteBranch in summary.remoteBranches)
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.cloud_outlined),
+              title: Text(remoteBranch),
+              trailing: PopupMenuButton<String>(
+                tooltip: 'Remote branch actions',
+                onSelected: (choice) async {
+                  switch (choice) {
+                    case 'checkout':
+                      await _checkoutRemote(context, state, repositoryPath,
+                          summary, remoteBranch);
+                    case 'merge':
+                      await _merge(context, state, repositoryPath, remoteBranch,
+                          into: current!, fromRemote: true);
+                    case 'rebase':
+                      await _rebase(
+                          context, state, repositoryPath, remoteBranch,
+                          current: current!, fromRemote: true);
+                    case 'pick':
+                      await _pickFrom(
+                          context, state, repositoryPath, remoteBranch,
+                          current: current ?? 'HEAD', fromRemote: true);
+                  }
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: 'checkout',
+                    enabled: !summary.busy,
+                    child: const Text('Check out as a local branch…'),
+                  ),
+                  PopupMenuItem(
+                    value: 'merge',
+                    enabled: canMerge,
+                    child: Text(
+                      current == null ? 'Merge' : 'Merge into $current',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'rebase',
+                    enabled: canMerge,
+                    child: Text(
+                      current == null
+                          ? 'Rebase onto this…'
+                          : 'Rebase $current onto this…',
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'pick',
+                    enabled: hasCommits && !summary.busy,
+                    child: const Text('Cherry-pick a commit…'),
+                  ),
+                ],
+              ),
+            ),
+        ],
+        _Heading(
+          label: 'Tags',
+          count: summary.tags.length,
+          trailing: TextButton.icon(
+            onPressed: hasCommits
+                ? () => _newTag(context, state, repositoryPath)
+                : null,
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('New tag'),
+          ),
+        ),
+        if (summary.tags.isEmpty)
+          hint('No tags.')
+        else
+          for (final tag in summary.tags)
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.sell_outlined),
+              title: Text(tag),
+              trailing: PopupMenuButton<String>(
+                tooltip: 'Tag actions',
+                onSelected: (choice) async {
+                  if (choice == 'delete') {
+                    await _deleteTag(context, state, repositoryPath, tag);
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'delete', child: Text('Delete…')),
                 ],
               ),
             ),
@@ -460,6 +643,1009 @@ class _Branches extends StatelessWidget {
     );
   }
 }
+
+/// What the last merge, cherry-pick, revert, rebase or stash application
+/// did, by name (`care.reported`).
+class _OperationReport extends StatelessWidget {
+  final ExplorerState state;
+  final OperationResult result;
+  final String? into;
+
+  const _OperationReport({
+    required this.state,
+    required this.result,
+    required this.into,
+  });
+
+  String _headline() {
+    final target = into ?? 'HEAD';
+    final subject = result.subject;
+    final conflicts = result.conflicts.length;
+    final commits = _count(result.replayed, 'commit', 'commits');
+
+    if (result.error != null) {
+      return switch (result.operation) {
+        Operation.merge => 'Merging $subject failed',
+        Operation.cherryPick => 'Cherry-picking $subject failed',
+        Operation.revert => 'Reverting $subject failed',
+        Operation.rebase => 'Rebasing onto $subject failed',
+        Operation.applyStash ||
+        Operation.popStash =>
+          'Applying $subject failed',
+        Operation.continueOperation => 'Continuing the $subject failed',
+      };
+    }
+
+    if (result.outcome == 'conflicted') {
+      final resolve = conflicts == 0
+          ? 'there are conflicts to resolve'
+          : '${_count(conflicts, 'file needs', 'files need')} resolving';
+      return switch (result.operation) {
+        Operation.merge => 'Merging $subject: $resolve',
+        Operation.cherryPick => 'Cherry-picking $subject: $resolve',
+        Operation.revert => 'Reverting $subject: $resolve',
+        Operation.rebase ||
+        Operation.continueOperation =>
+          'The rebase stopped again: $resolve',
+        Operation.applyStash => 'Applying $subject: $resolve',
+        // `rewriting.a-conflicted-stash-is-kept`
+        Operation.popStash => 'Applying $subject: $resolve. The stash is kept.',
+      };
+    }
+
+    return switch ((result.operation, result.outcome)) {
+      (Operation.merge, 'alreadyUpToDate') =>
+        '$target already has everything in $subject',
+      (Operation.merge, 'fastForward') => 'Moved $target forward to $subject',
+      (Operation.merge, _) => 'Merged $subject into $target',
+      (Operation.cherryPick, 'empty') =>
+        '$target already has the change $subject made',
+      (Operation.cherryPick, _) => 'Cherry-picked $subject onto $target',
+      (Operation.revert, 'empty') =>
+        'Nothing to revert: $target no longer has the change $subject made',
+      (Operation.revert, _) => 'Reverted $subject',
+      (Operation.rebase, 'alreadyThere') =>
+        '$target is already on top of $subject',
+      (Operation.rebase, _) => result.replayed == 0
+          ? 'Moved $target forward to $subject'
+          : 'Rebased $target onto $subject, replaying $commits',
+      (Operation.applyStash, _) => 'Applied $subject; it is still stashed',
+      (Operation.popStash, _) => 'Applied and dropped $subject',
+      (Operation.continueOperation, 'applied') => 'Finished the $subject',
+      (Operation.continueOperation, _) => result.replayed == 0
+          ? 'Finished the rebase'
+          : 'Finished the rebase, replaying $commits',
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Card(
+        margin: EdgeInsets.zero,
+        elevation: 0,
+        surfaceTintColor: Colors.transparent,
+        color: result.ok
+            ? successBackground(context)
+            : theme.colorScheme.errorContainer,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _headline(),
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: result.ok ? onSuccessBackground(context) : null,
+                      ),
+                    ),
+                    for (final path in result.conflicts.take(10))
+                      Text(path, style: monospaceStyle(context)),
+                    if (result.conflicts.length > 10)
+                      Text('and ${result.conflicts.length - 10} more'),
+                    if (result.error case final message?)
+                      Text(message, style: theme.textTheme.bodySmall),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'Dismiss',
+                color: result.ok ? onSuccessBackground(context) : null,
+                onPressed: state.dismissLastOperation,
+                icon: const Icon(Icons.close),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The way out of whatever stopped on conflicts, shown for as long as it
+/// lasts (`branching.a-merge-in-progress-is-always-visible`,
+/// `rewriting.one-thing-in-progress-at-a-time`).
+class _InProgressBanner extends StatelessWidget {
+  final ExplorerState state;
+  final RepositorySummary summary;
+
+  const _InProgressBanner({required this.state, required this.summary});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final kind = summary.inProgress!;
+    final conflicts =
+        state.staging?.rows.where((r) => r.isConflicted).length ?? 0;
+    final finish = kind == InProgress.merge ? 'commit' : 'continue';
+    final commit = summary.inProgressCommit;
+
+    final what = switch (kind) {
+      InProgress.merge => 'A merge is in progress.',
+      InProgress.cherryPick => 'Cherry-picking $commit.',
+      InProgress.revert => 'Reverting $commit.',
+      InProgress.rebase => summary.rebaseRemaining == 0
+          ? 'Rebasing: stopped at $commit.'
+          : 'Rebasing: stopped at $commit, with '
+              '${_count(summary.rebaseRemaining, 'commit', 'commits')} to go.',
+    };
+    final next = conflicts == 0
+        ? '${finish[0].toUpperCase()}${finish.substring(1)} to finish it.'
+        : 'Resolve '
+            '${_count(conflicts, 'conflicted file', 'conflicted files')}, '
+            'stage and $finish to finish it.';
+
+    return Material(
+      color: theme.colorScheme.tertiaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+        child: Row(
+          children: [
+            Icon(
+              kind == InProgress.merge ? Icons.merge : Icons.alt_route,
+              color: theme.colorScheme.onTertiaryContainer,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                '$what $next',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onTertiaryContainer,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: () =>
+                  _abortOperation(context, state, summary.path, kind),
+              child: Text('Abort ${kind.label}'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Shows what an action did, or why it was refused, in a snackbar.
+void _report(
+  BuildContext context,
+  ExplorerState state, {
+  required bool ok,
+  required String done,
+  required String refused,
+}) {
+  if (!context.mounted) return;
+  final failure = state.error ?? refused;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: copyableSnackBarMessage(
+        ok ? done : failure,
+        copyText: ok ? null : failure,
+      ),
+    ),
+  );
+}
+
+/// Asks a yes-or-no question whose yes does something that cannot be undone.
+Future<bool> _confirm(
+  BuildContext context, {
+  required String title,
+  required String body,
+  required String action,
+  List<String> paths = const [],
+}) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(title),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(body),
+            if (paths.isNotEmpty) const SizedBox(height: 12),
+            for (final path in paths.take(20))
+              Text(path, style: monospaceStyle(context)),
+            if (paths.length > 20) Text('and ${paths.length - 20} more'),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(action),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
+}
+
+/// Switches branch, offering to force it when uncommitted changes are in the
+/// way (`branching.a-checkout-that-would-lose-work-is-refused-first`).
+Future<void> _checkout(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  String branch,
+) async {
+  var outcome = await state.checkoutBranch(repositoryPath, branch);
+  if (!context.mounted) return;
+  if (outcome != null && !outcome.ok) {
+    final force = await _confirm(
+      context,
+      title: 'Switch to $branch anyway?',
+      body: 'These files have changes that are not committed, and $branch '
+          'has different versions of them. Switching will replace them, '
+          'and the changes will be lost.',
+      action: 'Discard and switch',
+      paths: outcome.blockedBy,
+    );
+    if (!force || !context.mounted) return;
+    outcome = await state.checkoutBranch(repositoryPath, branch, force: true);
+  }
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: outcome != null && outcome.ok,
+    done: outcome == null || outcome.degraded.isEmpty
+        ? 'Switched to $branch'
+        : 'Switched to $branch; '
+            '${_count(outcome.degraded.length, 'file', 'files')} could not '
+            'take the mode git records',
+    refused: 'Could not switch to $branch',
+  );
+}
+
+/// Asks for a new branch's name, and whether to switch to it.
+Future<void> _newBranch(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath, {
+  String? startPoint,
+  String? startLabel,
+}) async {
+  final controller = TextEditingController();
+  var switchTo = true;
+
+  final name = await showDialog<String>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: Text(
+          startPoint == null
+              ? 'New branch'
+              : 'New branch from ${startLabel ?? startPoint}',
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                helperText: 'Slashes group branches, as in feature/thing',
+              ),
+              onSubmitted: (value) => Navigator.pop(context, value),
+            ),
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: switchTo,
+              onChanged: (value) => setState(() => switchTo = value ?? false),
+              title: const Text('Switch to it'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  final branch = name?.trim();
+  if (branch == null || branch.isEmpty) return;
+
+  final outcome = await state.createBranch(
+    repositoryPath,
+    branch,
+    startPoint: startPoint,
+    checkout: switchTo,
+  );
+  if (!context.mounted) return;
+  if (outcome != null && !outcome.ok) {
+    // Created, and not switched to: offer the same choice a switch does.
+    await _checkout(context, state, repositoryPath, branch);
+    return;
+  }
+  _report(
+    context,
+    state,
+    ok: outcome != null,
+    done: switchTo ? 'Created and switched to $branch' : 'Created $branch',
+    refused: 'Could not create $branch',
+  );
+}
+
+/// Creates a local branch from a remote one, following it, and switches to it
+/// (`branching.a-remote-branch-is-checked-out-as-a-local-one`).
+Future<void> _checkoutRemote(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  RepositorySummary summary,
+  String remoteBranch,
+) async {
+  final suggested = remoteBranch.substring(remoteBranch.indexOf('/') + 1);
+
+  // A local branch of that name already following it needs no new branch.
+  if (summary.upstreams[suggested] == remoteBranch) {
+    await _checkout(context, state, repositoryPath, suggested);
+    return;
+  }
+
+  final controller = TextEditingController(
+    text: summary.branches.contains(suggested) ? '' : suggested,
+  );
+  final name = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('Check out $remoteBranch'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        decoration: InputDecoration(
+          labelText: 'Local branch name',
+          helperText: summary.branches.contains(suggested)
+              ? 'There is already a branch called $suggested'
+              : 'It will follow $remoteBranch',
+        ),
+        onSubmitted: (value) => Navigator.pop(context, value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, controller.text),
+          child: const Text('Check out'),
+        ),
+      ],
+    ),
+  );
+
+  final branch = name?.trim();
+  if (branch == null || branch.isEmpty) return;
+
+  final outcome = await state.createBranch(
+    repositoryPath,
+    branch,
+    startPoint: remoteBranch,
+    fromRemote: true,
+    checkout: true,
+  );
+  if (!context.mounted) return;
+  if (outcome != null && !outcome.ok) {
+    await _checkout(context, state, repositoryPath, branch);
+    return;
+  }
+  _report(
+    context,
+    state,
+    ok: outcome != null,
+    done: 'Switched to $branch, following $remoteBranch',
+    refused: 'Could not check out $remoteBranch',
+  );
+}
+
+Future<void> _merge(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  String source, {
+  required String into,
+  bool fromRemote = false,
+}) async {
+  final merged = await state.mergeBranch(
+    repositoryPath,
+    source,
+    fromRemote: fromRemote,
+  );
+  // A merge that ran is reported on its own card; only a refusal needs
+  // saying here.
+  if (merged == null && context.mounted) {
+    _report(
+      context,
+      state,
+      ok: false,
+      done: '',
+      refused: 'Could not merge $source into $into',
+    );
+  }
+}
+
+Future<void> _abortOperation(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  InProgress kind,
+) async {
+  final confirmed = await _confirm(
+    context,
+    title: 'Abort the ${kind.label}?',
+    body: switch (kind) {
+      InProgress.rebase =>
+        'The branch goes back to where it was before the rebase, with its '
+            'original commits. Conflicts already resolved, and anything else '
+            'changed since, will be lost.',
+      _ => 'The files and the staging area go back to how they were before '
+          'the ${kind.label}. Conflicts already resolved, and anything else '
+          'changed since, will be lost.',
+    },
+    action: 'Abort ${kind.label}',
+  );
+  if (!confirmed) return;
+  final ok = await state.abortOperation(repositoryPath);
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: '${kind.label[0].toUpperCase()}${kind.label.substring(1)} '
+        'abandoned',
+    refused: 'Could not abort the ${kind.label}',
+  );
+}
+
+/// Replays the current branch onto [onto], after saying what that does
+/// (`rewriting.a-rebase-is-confirmed`).
+Future<void> _rebase(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  String onto, {
+  required String current,
+  bool fromRemote = false,
+}) async {
+  final confirmed = await _confirm(
+    context,
+    title: 'Rebase $current onto $onto?',
+    body: 'The commits $current has that $onto does not are written again '
+        'on top of $onto, with new names. If $current has been pushed, '
+        'anyone who has it will see it diverge, and pushing it again will '
+        'need force. The old commits stay in the reflog.',
+    action: 'Rebase',
+  );
+  if (!confirmed) return;
+  final result =
+      await state.rebaseOnto(repositoryPath, onto, fromRemote: fromRemote);
+  if (result == null && context.mounted) {
+    _report(
+      context,
+      state,
+      ok: false,
+      done: '',
+      refused: 'Could not rebase $current onto $onto',
+    );
+  }
+}
+
+/// Lists what [branch] has that HEAD does not, and cherry-picks the one
+/// chosen (`rewriting.cherry-picking-starts-from-the-branch`).
+Future<void> _pickFrom(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  String branch, {
+  required String current,
+  bool fromRemote = false,
+}) async {
+  final commits =
+      await state.unmerged(repositoryPath, branch, fromRemote: fromRemote);
+  if (!context.mounted) return;
+  if (commits.isEmpty) {
+    _report(
+      context,
+      state,
+      ok: state.error == null,
+      done: '$branch has no commits that $current does not',
+      refused: 'Could not list the commits on $branch',
+    );
+    return;
+  }
+
+  final chosen = await showDialog<CommitData>(
+    context: context,
+    builder: (context) => SimpleDialog(
+      title: Text('Cherry-pick from $branch onto $current'),
+      children: [
+        for (final commit in commits)
+          SimpleDialogOption(
+            onPressed:
+                commit.isMerge ? null : () => Navigator.pop(context, commit),
+            child: Row(
+              children: [
+                Text(commit.shortId, style: monospaceStyle(context)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    commit.isMerge
+                        ? '${commit.summary} (a merge; not offered)'
+                        : commit.summary,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    ),
+  );
+  if (chosen == null) return;
+  final result = await state.cherryPick(repositoryPath, chosen.id);
+  if (result == null && context.mounted) {
+    _report(
+      context,
+      state,
+      ok: false,
+      done: '',
+      refused: 'Could not cherry-pick ${chosen.shortId}',
+    );
+  }
+}
+
+Future<void> _revertCommit(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  CommitData commit,
+) async {
+  final result = await state.revertCommit(repositoryPath, commit.id);
+  if (result == null && context.mounted) {
+    _report(
+      context,
+      state,
+      ok: false,
+      done: '',
+      refused: 'Could not revert ${commit.shortId}',
+    );
+  }
+}
+
+/// Asks for a stash message and whether untracked files go too.
+Future<void> _stashChanges(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+) async {
+  final message = TextEditingController();
+  var includeUntracked = false;
+
+  final stash = await showDialog<bool>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: const Text('Stash the changes'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: message,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Message (optional)',
+                helperText: 'The files go back to how HEAD has them',
+              ),
+              onSubmitted: (_) => Navigator.pop(context, true),
+            ),
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: includeUntracked,
+              onChanged: (value) =>
+                  setState(() => includeUntracked = value ?? false),
+              title: const Text('Untracked files too'),
+              subtitle: const Text('They are removed from disk until the '
+                  'stash is applied'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Stash'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (stash != true) return;
+
+  final ok = await state.saveStash(
+    repositoryPath,
+    message: message.text,
+    includeUntracked: includeUntracked,
+  );
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: 'Stashed the changes',
+    refused: 'Could not stash the changes',
+  );
+}
+
+Future<void> _dropStash(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  StashData stash,
+) async {
+  final confirmed = await _confirm(
+    context,
+    title: 'Drop ${stash.name}?',
+    body: 'The changes it holds are removed from the list. They can be '
+        'found again only by searching for unreachable commits, until git '
+        'cleans those up.',
+    action: 'Drop',
+  );
+  if (!confirmed) return;
+  final ok = await state.dropStash(repositoryPath, stash.index);
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: 'Dropped ${stash.name}',
+    refused: 'Could not drop ${stash.name}',
+  );
+}
+
+Future<void> _useStash(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  StashData stash, {
+  required bool pop,
+}) async {
+  final result = await state.applyStash(repositoryPath, stash.index, pop: pop);
+  if (result == null && context.mounted) {
+    _report(
+      context,
+      state,
+      ok: false,
+      done: '',
+      refused: 'Could not apply ${stash.name}',
+    );
+  }
+}
+
+Future<void> _chooseUpstream(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  RepositorySummary summary,
+  String branch,
+) async {
+  final current = summary.upstreams[branch];
+  // A sentinel for "follow nothing", since null means the dialog was closed.
+  const none = '';
+
+  final chosen = await showDialog<String>(
+    context: context,
+    builder: (context) => SimpleDialog(
+      title: Text('What should $branch follow?'),
+      children: [
+        for (final remoteBranch in summary.remoteBranches)
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, remoteBranch),
+            child: Row(
+              children: [
+                Icon(
+                  remoteBranch == current
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  size: 18,
+                ),
+                const SizedBox(width: 12),
+                Flexible(child: Text(remoteBranch)),
+              ],
+            ),
+          ),
+        if (current != null)
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(context, none),
+            child: const Row(
+              children: [
+                Icon(Icons.link_off, size: 18),
+                SizedBox(width: 12),
+                Text('Nothing'),
+              ],
+            ),
+          ),
+      ],
+    ),
+  );
+  if (chosen == null || chosen == current) return;
+
+  final upstream = chosen == none ? null : chosen;
+  final ok = await state.setUpstream(repositoryPath, branch, upstream);
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: upstream == null
+        ? '$branch follows nothing now'
+        : '$branch follows $upstream',
+    refused: 'Could not change what $branch follows',
+  );
+}
+
+/// Asks for a tag's name and, optionally, a message — which makes it an
+/// annotated tag, carrying who made it.
+Future<void> _newTag(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath, {
+  String? at,
+  String? atLabel,
+}) async {
+  final name = TextEditingController();
+  final message = TextEditingController();
+
+  final created = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title:
+          Text(at == null ? 'New tag at HEAD' : 'New tag at ${atLabel ?? at}'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: name,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Name',
+              hintText: 'v1.0',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: message,
+            minLines: 1,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              labelText: 'Message (optional)',
+              helperText: 'With a message the tag records who made it',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Create'),
+        ),
+      ],
+    ),
+  );
+
+  final tag = name.text.trim();
+  if (created != true || tag.isEmpty) return;
+
+  final ok = await state.createTag(
+    repositoryPath,
+    tag,
+    at: at,
+    message: message.text,
+  );
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: 'Tagged ${atLabel ?? 'HEAD'} as $tag',
+    refused: 'Could not create $tag',
+  );
+}
+
+Future<void> _deleteTag(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  String tag,
+) async {
+  final confirmed = await _confirm(
+    context,
+    title: 'Delete $tag?',
+    body: 'The commit it names stays. If the tag was pushed, the remote '
+        'keeps its copy until it is deleted there too.',
+    action: 'Delete',
+  );
+  if (!confirmed) return;
+  final ok = await state.deleteTag(repositoryPath, tag);
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: 'Deleted $tag',
+    refused: 'Could not delete $tag',
+  );
+}
+
+/// Moves the current branch to [commit], in the strength the user picks
+/// (`branching.a-reset-says-how-much-it-keeps`).
+Future<void> _resetTo(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  RepositorySummary summary,
+  CommitData commit,
+) async {
+  var strength = ResetStrength.mixed;
+  final target = summary.detached ? 'HEAD' : summary.branch ?? 'HEAD';
+
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: Text('Reset $target to ${commit.shortId}?'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Commits after this one leave $target. They are not deleted, '
+                'and the reflog still names them.',
+              ),
+              const SizedBox(height: 8),
+              RadioGroup<ResetStrength>(
+                groupValue: strength,
+                onChanged: (value) =>
+                    setState(() => strength = value ?? strength),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final choice in ResetStrength.values)
+                      RadioListTile<ResetStrength>(
+                        contentPadding: EdgeInsets.zero,
+                        value: choice,
+                        title: Text(choice.label),
+                        subtitle: Text(switch (choice) {
+                          ResetStrength.soft => 'soft',
+                          ResetStrength.mixed => 'mixed',
+                          ResetStrength.hard =>
+                            'hard — uncommitted changes are lost too',
+                        }),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: strength == ResetStrength.hard
+                ? FilledButton.styleFrom(
+                    backgroundColor: Theme.of(context).colorScheme.error,
+                    foregroundColor: Theme.of(context).colorScheme.onError,
+                  )
+                : null,
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (confirmed != true) return;
+
+  final ok = await state.resetBranch(repositoryPath, commit.id, strength);
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: 'Reset $target to ${commit.shortId}',
+    refused: 'Could not reset $target',
+  );
+}
+
+Future<void> _discard(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  StatusRow row,
+) async {
+  final confirmed = await _confirm(
+    context,
+    title: 'Discard changes to ${row.path}?',
+    body: row.staged == null
+        ? 'The file goes back to how HEAD has it. The changes are not '
+            'recorded anywhere, and cannot be recovered.'
+        // Said outright: a staged version is easy to forget having made.
+        : 'The file goes back to how HEAD has it, and the staged version '
+            'goes too. The changes on disk cannot be recovered.',
+    action: 'Discard',
+  );
+  if (!confirmed) return;
+  final ok = await state.discardChanges(repositoryPath, row.path);
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: 'Discarded the changes to ${row.path}',
+    refused: 'Could not discard the changes to ${row.path}',
+  );
+}
+
+/// Whether a row can be discarded back to HEAD: tracked there, and not a
+/// conflict (`branching.discarding-goes-back-to-head`).
+bool _canDiscard(StatusRow row) =>
+    row.unstaged != null &&
+    !row.isUntracked &&
+    !row.isConflicted &&
+    row.staged != FileState.added;
 
 Future<void> _renameBranch(
   BuildContext context,
@@ -677,11 +1863,31 @@ class _Remotes extends StatelessWidget {
                           : null,
                       icon: const Icon(Icons.upload_outlined),
                     ),
-                  IconButton(
-                    tooltip: 'Remove',
-                    onPressed: () =>
-                        state.removeRemote(repositoryPath, remote.name),
-                    icon: const Icon(Icons.remove_circle_outline),
+                  PopupMenuButton<String>(
+                    tooltip: 'Remote actions',
+                    onSelected: (choice) async {
+                      switch (choice) {
+                        case 'rename':
+                          await _renameRemote(
+                              context, state, repositoryPath, remote.name);
+                        case 'remove':
+                          final confirmed = await _confirm(
+                            context,
+                            title: 'Remove ${remote.name}?',
+                            body: 'Its copies of the remote branches go too. '
+                                'Nothing on the remote itself changes.',
+                            action: 'Remove',
+                          );
+                          if (confirmed) {
+                            await state.removeRemote(
+                                repositoryPath, remote.name);
+                          }
+                      }
+                    },
+                    itemBuilder: (context) => const [
+                      PopupMenuItem(value: 'rename', child: Text('Rename…')),
+                      PopupMenuItem(value: 'remove', child: Text('Remove…')),
+                    ],
                   ),
                 ],
               ),
@@ -1161,6 +2367,52 @@ class _Divergence extends StatelessWidget {
   }
 }
 
+Future<void> _renameRemote(
+  BuildContext context,
+  ExplorerState state,
+  String repositoryPath,
+  String remote,
+) async {
+  final controller = TextEditingController(text: remote);
+  final name = await showDialog<String>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('Rename $remote'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'New name',
+          helperText: 'What it fetched, and what follows it, keep up',
+        ),
+        onSubmitted: (value) => Navigator.pop(context, value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, controller.text),
+          child: const Text('Rename'),
+        ),
+      ],
+    ),
+  );
+
+  final to = name?.trim();
+  if (to == null || to.isEmpty || to == remote) return;
+  final ok = await state.renameRemote(repositoryPath, remote, to);
+  if (!context.mounted) return;
+  _report(
+    context,
+    state,
+    ok: ok,
+    done: 'Renamed $remote to $to',
+    refused: 'Could not rename $remote',
+  );
+}
+
 Future<void> _addRemote(
   BuildContext context,
   ExplorerState state,
@@ -1234,6 +2486,9 @@ class _StagingLists extends StatelessWidget {
 
     final staged = staging.staged;
     final notStaged = staging.notStaged;
+    final summary = state.summaryFor(repositoryPath);
+    final stashes = summary?.stashes ?? const <StashData>[];
+    final busy = summary?.busy ?? false;
 
     Widget hint(String text) => Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -1305,6 +2560,58 @@ class _StagingLists extends StatelessWidget {
               onToggle: () =>
                   state.setStaged(repositoryPath, row.path, staged: true),
               onOpen: () => state.selectFile(repositoryPath, row.path),
+              onDiscard: _canDiscard(row)
+                  ? () => _discard(context, state, repositoryPath, row)
+                  : null,
+            ),
+        _Heading(
+          label: 'Stashes',
+          count: stashes.length,
+          trailing: TextButton.icon(
+            onPressed: staging.isEmpty || busy
+                ? null
+                : () => _stashChanges(context, state, repositoryPath),
+            icon: const Icon(Icons.inventory_2_outlined, size: 18),
+            label: const Text('Stash changes'),
+          ),
+        ),
+        if (stashes.isEmpty)
+          hint('Nothing stashed.')
+        else
+          for (final stash in stashes)
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.inventory_2_outlined),
+              title: Text(stash.message, overflow: TextOverflow.ellipsis),
+              subtitle: Text(stash.name),
+              trailing: PopupMenuButton<String>(
+                tooltip: 'Stash actions',
+                onSelected: (choice) async {
+                  switch (choice) {
+                    case 'apply':
+                      await _useStash(context, state, repositoryPath, stash,
+                          pop: false);
+                    case 'pop':
+                      await _useStash(context, state, repositoryPath, stash,
+                          pop: true);
+                    case 'drop':
+                      await _dropStash(context, state, repositoryPath, stash);
+                  }
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: 'pop',
+                    enabled: !busy,
+                    child: const Text('Apply and drop'),
+                  ),
+                  PopupMenuItem(
+                    value: 'apply',
+                    enabled: !busy,
+                    child: const Text('Apply, and keep it'),
+                  ),
+                  const PopupMenuItem(value: 'drop', child: Text('Drop…')),
+                ],
+              ),
             ),
       ],
     );
@@ -1317,11 +2624,15 @@ class _StagingRow extends StatelessWidget {
   final VoidCallback onToggle;
   final VoidCallback onOpen;
 
+  /// Offered only where going back to HEAD is what discarding means.
+  final VoidCallback? onDiscard;
+
   const _StagingRow({
     required this.row,
     required this.staged,
     required this.onToggle,
     required this.onOpen,
+    this.onDiscard,
   });
 
   @override
@@ -1344,10 +2655,21 @@ class _StagingRow extends StatelessWidget {
         ),
       ),
       title: Text(row.path, overflow: TextOverflow.ellipsis),
-      trailing: IconButton(
-        tooltip: staged ? 'Unstage' : 'Stage',
-        onPressed: onToggle,
-        icon: Icon(staged ? Icons.remove : Icons.add),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (onDiscard != null)
+            IconButton(
+              tooltip: 'Discard changes',
+              onPressed: onDiscard,
+              icon: const Icon(Icons.undo),
+            ),
+          IconButton(
+            tooltip: staged ? 'Unstage' : 'Stage',
+            onPressed: onToggle,
+            icon: Icon(staged ? Icons.remove : Icons.add),
+          ),
+        ],
       ),
       onTap: onOpen,
     );
@@ -1372,6 +2694,10 @@ class _CommitBox extends StatefulWidget {
 class _CommitBoxState extends State<_CommitBox> {
   final _message = TextEditingController();
 
+  /// Which stopped operation, and which commit of it, the prepared message
+  /// was last offered for.
+  String? _offeredFor;
+
   @override
   void dispose() {
     _message.dispose();
@@ -1379,6 +2705,17 @@ class _CommitBoxState extends State<_CommitBox> {
   }
 
   Future<void> _commit() async {
+    final stopped = widget.state.summaryFor(widget.repositoryPath)?.inProgress;
+    // A cherry-pick, revert or rebase is finished by continuing it, which
+    // is what records it as finished (`rewriting.continuing-is-committing`).
+    if (stopped != null && stopped != InProgress.merge) {
+      final result = await widget.state.continueOperation(
+        widget.repositoryPath,
+        _message.text,
+      );
+      if (result != null) _message.clear();
+      return;
+    }
     final commit = await widget.state.commitStaged(
       widget.repositoryPath,
       _message.text,
@@ -1394,7 +2731,20 @@ class _CommitBoxState extends State<_CommitBox> {
     if (staging == null) return const SizedBox.shrink();
 
     final staged = staging.staged;
-    final canCommit = staged.isNotEmpty &&
+    final summary = state.summaryFor(widget.repositoryPath);
+    final stopped = summary?.inProgress;
+    final prepared = summary?.preparedMessage;
+    // The message the stopped operation prepared is offered once for each
+    // commit it stops on, as git offers it.
+    final offerKey =
+        stopped == null ? null : '${stopped.name} ${summary?.inProgressCommit}';
+    if (offerKey != null && prepared != null && _offeredFor != offerKey) {
+      _offeredFor = offerKey;
+      if (_message.text.trim().isEmpty) _message.text = prepared.trimRight();
+    } else if (offerKey == null) {
+      _offeredFor = null;
+    }
+    final canCommit = (staged.isNotEmpty || stopped != null) &&
         _message.text.trim().isNotEmpty &&
         staging.identity != null &&
         !staging.hasConflicts &&
@@ -1503,8 +2853,15 @@ class _CommitBoxState extends State<_CommitBox> {
                   child: Text(
                     state.isCommitting
                         ? 'Committing…'
-                        : 'Commit ${staged.length} '
-                            '${staged.length == 1 ? 'file' : 'files'}',
+                        : switch (stopped) {
+                              InProgress.merge => 'Commit the merge',
+                              InProgress.rebase => 'Continue the rebase',
+                              InProgress.cherryPick => 'Finish the cherry-pick',
+                              InProgress.revert => 'Finish the revert',
+                              null => null,
+                            } ??
+                            'Commit ${staged.length} '
+                                '${staged.length == 1 ? 'file' : 'files'}',
                   ),
                 ),
               ],
@@ -1565,8 +2922,9 @@ class _RevisionButton extends StatelessWidget {
 class _CommitRow extends StatelessWidget {
   final CommitData commit;
   final VoidCallback onTap;
+  final Widget? actions;
 
-  const _CommitRow({required this.commit, required this.onTap});
+  const _CommitRow({required this.commit, required this.onTap, this.actions});
 
   @override
   Widget build(BuildContext context) {
@@ -1584,7 +2942,75 @@ class _CommitRow extends StatelessWidget {
         '${commit.isMerge ? ' · merge' : ''}',
         overflow: TextOverflow.ellipsis,
       ),
+      trailing: actions,
       onTap: onTap,
+    );
+  }
+}
+
+/// What can be started from a commit in the history.
+class _CommitActions extends StatelessWidget {
+  final ExplorerState state;
+  final RepositorySummary summary;
+  final CommitData commit;
+
+  const _CommitActions({
+    required this.state,
+    required this.summary,
+    required this.commit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final target = summary.detached ? 'HEAD' : summary.branch ?? 'HEAD';
+    return PopupMenuButton<String>(
+      tooltip: 'Commit actions',
+      onSelected: (choice) async {
+        switch (choice) {
+          case 'branch':
+            await _newBranch(
+              context,
+              state,
+              summary.path,
+              startPoint: commit.id,
+              startLabel: commit.shortId,
+            );
+          case 'tag':
+            await _newTag(
+              context,
+              state,
+              summary.path,
+              at: commit.id,
+              atLabel: commit.shortId,
+            );
+          case 'reset':
+            await _resetTo(context, state, summary.path, summary, commit);
+          case 'revert':
+            await _revertCommit(context, state, summary.path, commit);
+        }
+      },
+      itemBuilder: (context) => [
+        const PopupMenuItem(value: 'branch', child: Text('New branch here…')),
+        const PopupMenuItem(value: 'tag', child: Text('New tag here…')),
+        PopupMenuItem(
+          value: 'reset',
+          // A merge can be reset away; a stopped cherry-pick, revert or
+          // rebase has to be finished or abandoned first.
+          enabled:
+              commit.id != summary.headId && (!summary.busy || summary.merging),
+          child: Text('Reset $target to here…'),
+        ),
+        PopupMenuItem(
+          value: 'revert',
+          // `rewriting.a-merge-is-not-reverted-here`
+          enabled: !commit.isMerge && !summary.busy,
+          child: Text(
+            commit.isMerge
+                ? 'Revert (not offered for a merge)'
+                : 'Revert this commit',
+          ),
+        ),
+      ],
     );
   }
 }

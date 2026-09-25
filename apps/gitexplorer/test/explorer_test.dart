@@ -884,6 +884,570 @@ void main() {
       );
     });
 
+    group('branches, tags, merging and undoing', () {
+      String lines(String output) => output.trim();
+
+      test('creates a branch and checks it out, and git agrees', () async {
+        final path = ownRepository('checkout-create');
+
+        final created =
+            await service.createBranch(path, 'feature', checkout: true);
+        expect(created.ok, isTrue);
+        expect(created.summary.branch, 'feature');
+        expect(created.summary.branches, ['feature', 'main']);
+        expect(lines(git(['symbolic-ref', '--short', 'HEAD'], cwd: path)),
+            'feature');
+
+        File(p.join(path, 'b.txt')).writeAsStringSync('on feature\n');
+        git(['add', '.'], cwd: path);
+        git(['commit', '-q', '-m', 'feature work'], cwd: path);
+
+        final back = await service.checkoutBranch(path, 'main');
+        expect(back.ok, isTrue);
+        expect(back.summary.branch, 'main');
+        expect(File(p.join(path, 'b.txt')).existsSync(), isFalse);
+        expect(git(['status', '--porcelain'], cwd: path), isEmpty);
+      });
+
+      test('a checkout that would overwrite a change is refused, naming it, '
+          'until forced', () async {
+        final path = ownRepository('checkout-blocked');
+        git(['checkout', '-q', '-b', 'other'], cwd: path);
+        File(p.join(path, 'a.txt')).writeAsStringSync('other\n');
+        git(['commit', '-q', '-am', 'other'], cwd: path);
+        git(['checkout', '-q', 'main'], cwd: path);
+        File(p.join(path, 'a.txt')).writeAsStringSync('uncommitted\n');
+
+        final refused = await service.checkoutBranch(path, 'other');
+        expect(refused.ok, isFalse);
+        expect(refused.blockedBy, ['a.txt']);
+        expect(lines(git(['symbolic-ref', '--short', 'HEAD'], cwd: path)),
+            'main');
+        expect(
+          File(p.join(path, 'a.txt')).readAsStringSync(),
+          'uncommitted\n',
+        );
+
+        final forced =
+            await service.checkoutBranch(path, 'other', force: true);
+        expect(forced.ok, isTrue);
+        expect(forced.summary.branch, 'other');
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'other\n');
+        expect(git(['status', '--porcelain'], cwd: path), isEmpty);
+      });
+
+      test('a remote branch checks out as a local branch that follows it',
+          () async {
+        final origin = ownRepository('track-origin');
+        git(['branch', 'topic'], cwd: origin);
+        final path = ownRepository('track-local');
+        await service.addRemote(path, 'origin', origin);
+        await service.fetchRemote(path, 'origin');
+
+        final summary = await service.open(path, 'local');
+        expect(summary.remoteBranches, containsAll(['origin/main', 'origin/topic']));
+
+        final outcome = await service.createBranch(
+          path,
+          'topic',
+          startPoint: 'origin/topic',
+          fromRemote: true,
+          checkout: true,
+        );
+        expect(outcome.summary.branch, 'topic');
+        expect(outcome.summary.upstreams['topic'], 'origin/topic');
+        expect(
+          lines(git(['rev-parse', '--abbrev-ref', 'topic@{upstream}'],
+              cwd: path)),
+          'origin/topic',
+        );
+        expect(
+          lines(git(['rev-parse', 'HEAD'], cwd: path)),
+          lines(git(['rev-parse', 'topic'], cwd: origin)),
+        );
+      });
+
+      test('the upstream can be set and forgotten', () async {
+        final origin = ownRepository('upstream-origin');
+        final path = ownRepository('upstream-local');
+        await service.addRemote(path, 'origin', origin);
+        await service.fetchRemote(path, 'origin');
+
+        var summary = await service.setUpstream(path, 'main', 'origin/main');
+        expect(summary.upstreams, {'main': 'origin/main'});
+        expect(
+          lines(git(['rev-parse', '--abbrev-ref', 'main@{upstream}'],
+              cwd: path)),
+          'origin/main',
+        );
+
+        summary = await service.setUpstream(path, 'main', null);
+        expect(summary.upstreams, isEmpty);
+        expect(
+          Process.runSync('git', ['config', 'branch.main.merge'],
+                  workingDirectory: path)
+              .exitCode,
+          1,
+        );
+      });
+
+      test('merges a branch, writing a commit with both parents', () async {
+        final path = ownRepository('merge-clean');
+        git(['checkout', '-q', '-b', 'side'], cwd: path);
+        File(p.join(path, 'side.txt')).writeAsStringSync('side\n');
+        git(['add', '.'], cwd: path);
+        git(['commit', '-q', '-m', 'side'], cwd: path);
+        git(['checkout', '-q', 'main'], cwd: path);
+        File(p.join(path, 'main.txt')).writeAsStringSync('main\n');
+        git(['add', '.'], cwd: path);
+        git(['commit', '-q', '-m', 'main'], cwd: path);
+
+        final merged = await service.mergeBranch(path, 'side');
+        expect(merged.ok, isTrue, reason: merged.error);
+        expect(merged.outcome, 'merged');
+        expect(
+          lines(git(['log', '-1', '--format=%P'], cwd: path)).split(' '),
+          hasLength(2),
+        );
+        expect(lines(git(['log', '-1', '--format=%s'], cwd: path)),
+            "Merge branch 'side'");
+        expect(git(['status', '--porcelain'], cwd: path), isEmpty);
+      });
+
+      test('a merge is refused while tracked files have changes', () async {
+        final path = ownRepository('merge-dirty');
+        git(['branch', 'side'], cwd: path);
+        File(p.join(path, 'a.txt')).writeAsStringSync('dirty\n');
+
+        await expectLater(
+          service.mergeBranch(path, 'side'),
+          throwsA(isA<GitWorkerException>()),
+        );
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'dirty\n');
+      });
+
+      /// Two branches that changed the same line.
+      String conflicted(String name) {
+        final path = ownRepository(name);
+        git(['checkout', '-q', '-b', 'side'], cwd: path);
+        File(p.join(path, 'a.txt')).writeAsStringSync('theirs\n');
+        git(['commit', '-q', '-am', 'theirs'], cwd: path);
+        git(['checkout', '-q', 'main'], cwd: path);
+        File(p.join(path, 'a.txt')).writeAsStringSync('ours\n');
+        git(['commit', '-q', '-am', 'ours'], cwd: path);
+        return path;
+      }
+
+      test('a conflicted merge is reported, and can be abandoned', () async {
+        final path = conflicted('merge-abort');
+        final head = lines(git(['rev-parse', 'HEAD'], cwd: path));
+
+        final merged = await service.mergeBranch(path, 'side');
+        expect(merged.outcome, 'conflicted');
+        expect(merged.conflicts, ['a.txt']);
+
+        final during = await service.open(path, 'repo');
+        expect(during.merging, isTrue);
+        expect(during.preparedMessage, contains("Merge branch 'side'"));
+        expect(
+          File(p.join(path, '.git', 'MERGE_HEAD')).existsSync(),
+          isTrue,
+        );
+
+        // Checking out elsewhere is not a way out of a merge.
+        await expectLater(
+          service.checkoutBranch(path, 'side'),
+          throwsA(isA<GitWorkerException>()),
+        );
+
+        final after = await service.abortOperation(path);
+        expect(after.merging, isFalse);
+        expect(lines(git(['rev-parse', 'HEAD'], cwd: path)), head);
+        expect(git(['status', '--porcelain'], cwd: path), isEmpty);
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'ours\n');
+      });
+
+      test('a conflicted merge is finished by staging and committing', () async {
+        final path = conflicted('merge-finish');
+        await service.mergeBranch(path, 'side');
+
+        File(p.join(path, 'a.txt')).writeAsStringSync('both\n');
+        final staging = await service.setStaged(path, 'a.txt', staged: true);
+        expect(staging.hasConflicts, isFalse);
+
+        // The prepared message is used when none is typed.
+        final commit = await service.commitStaged(path, '');
+        expect(commit.parents, hasLength(2));
+        expect(commit.summary, "Merge branch 'side'");
+        expect((await service.open(path, 'repo')).merging, isFalse);
+        expect(git(['status', '--porcelain'], cwd: path), isEmpty);
+        expect(git(['fsck', '--no-progress'], cwd: path), isNotNull);
+      });
+
+      test('creates and deletes tags, lightweight and annotated', () async {
+        final path = ownRepository('tags');
+        final first = lines(git(['rev-parse', 'HEAD'], cwd: path));
+        File(p.join(path, 'a.txt')).writeAsStringSync('two\n');
+        git(['commit', '-q', '-am', 'second'], cwd: path);
+
+        await service.createTag(path, 'light');
+        final summary = await service.createTag(
+          path,
+          'v1.0',
+          at: first,
+          message: 'the first release',
+        );
+        expect(summary.tags, ['light', 'v1.0']);
+
+        expect(lines(git(['cat-file', '-t', 'light'], cwd: path)), 'commit');
+        expect(lines(git(['cat-file', '-t', 'v1.0'], cwd: path)), 'tag');
+        expect(lines(git(['rev-parse', 'v1.0^{commit}'], cwd: path)), first);
+        expect(
+          git(['tag', '-l', '--format=%(contents)', 'v1.0'], cwd: path),
+          contains('the first release'),
+        );
+
+        final after = await service.deleteTag(path, 'v1.0');
+        expect(after.tags, ['light']);
+        expect(lines(git(['tag', '-l'], cwd: path)), 'light');
+      });
+
+      test('renaming a remote keeps what was fetched from it', () async {
+        final origin = ownRepository('rename-origin');
+        final path = ownRepository('rename-local');
+        await service.addRemote(path, 'origin', origin);
+        await service.fetchRemote(path, 'origin');
+
+        final remotes = await service.renameRemote(path, 'origin', 'upstream');
+        expect(remotes.map((r) => r.name), ['upstream']);
+        expect(remotes.single.neverFetched, isFalse);
+        expect(
+          lines(git(['rev-parse', 'refs/remotes/upstream/main'], cwd: path)),
+          lines(git(['rev-parse', 'main'], cwd: origin)),
+        );
+      });
+
+      test('discarding puts a file back to HEAD, staged half included',
+          () async {
+        final path = ownRepository('discard');
+        File(p.join(path, 'a.txt')).writeAsStringSync('staged\n');
+        git(['add', '.'], cwd: path);
+        File(p.join(path, 'a.txt')).writeAsStringSync('staged and more\n');
+
+        final staging = await service.discardChanges(path, 'a.txt');
+        expect(staging.isEmpty, isTrue);
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'one\n');
+        expect(git(['status', '--porcelain'], cwd: path), isEmpty);
+      });
+
+      test('discarding a file HEAD does not have is refused, and deletes '
+          'nothing', () async {
+        final path = ownRepository('discard-new');
+        File(p.join(path, 'new.txt')).writeAsStringSync('only copy\n');
+        git(['add', '.'], cwd: path);
+
+        await expectLater(
+          service.discardChanges(path, 'new.txt'),
+          throwsA(isA<GitWorkerException>()),
+        );
+        expect(File(p.join(path, 'new.txt')).existsSync(), isTrue);
+      });
+
+      test('resets in each strength, keeping what each says it keeps',
+          () async {
+        for (final strength in ResetStrength.values) {
+          final path = ownRepository('reset-${strength.name}');
+          final first = lines(git(['rev-parse', 'HEAD'], cwd: path));
+          File(p.join(path, 'a.txt')).writeAsStringSync('two\n');
+          git(['commit', '-q', '-am', 'second'], cwd: path);
+          final second = lines(git(['rev-parse', 'HEAD'], cwd: path));
+
+          final summary = await service.resetBranch(path, first, strength);
+          expect(summary.headId, first);
+          expect(lines(git(['rev-parse', 'ORIG_HEAD'], cwd: path)), second);
+
+          final status = lines(git(['status', '--porcelain'], cwd: path));
+          switch (strength) {
+            case ResetStrength.soft:
+              expect(status, 'M  a.txt');
+            case ResetStrength.mixed:
+              expect(status, 'M a.txt');
+            case ResetStrength.hard:
+              expect(status, isEmpty);
+              expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'one\n');
+          }
+        }
+      });
+    });
+
+    group('stashing, cherry-picking, reverting and rebasing', () {
+      String out(String path, List<String> arguments) =>
+          git(arguments, cwd: path).trim();
+
+      void commitFile(String path, String file, String text, String message) {
+        File(p.join(path, file)).writeAsStringSync(text);
+        git(['add', '.'], cwd: path);
+        git(['commit', '-q', '-m', message], cwd: path);
+      }
+
+      test('stashes, lists, applies and drops, as git stash does', () async {
+        final path = ownRepository('stash');
+        File(p.join(path, 'a.txt')).writeAsStringSync('edited\n');
+
+        var summary = await service.saveStash(path, message: 'half done');
+        expect(summary.stashes.map((s) => s.message), ['half done']);
+        expect(summary.changedCount, 0);
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'one\n');
+        // git sees the same stack.
+        expect(out(path, ['stash', 'list']), contains('half done'));
+
+        final applied = await service.applyStash(path, 0);
+        expect(applied.ok, isTrue);
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'edited\n');
+        expect((await service.open(path, 'r')).stashes, hasLength(1));
+
+        // Applying again is refused: the tree is no longer clean.
+        await expectLater(
+          service.applyStash(path, 0),
+          throwsA(isA<GitWorkerException>()),
+        );
+
+        summary = await service.dropStash(path, 0);
+        expect(summary.stashes, isEmpty);
+        expect(out(path, ['stash', 'list']), isEmpty);
+      });
+
+      test('popping drops the stash, and untracked files can go too',
+          () async {
+        final path = ownRepository('stash-pop');
+        File(p.join(path, 'a.txt')).writeAsStringSync('edited\n');
+        File(p.join(path, 'new.txt')).writeAsStringSync('new\n');
+
+        await service.saveStash(path, includeUntracked: true);
+        expect(File(p.join(path, 'new.txt')).existsSync(), isFalse);
+
+        final popped = await service.applyStash(path, 0, pop: true);
+        expect(popped.ok, isTrue);
+        expect(File(p.join(path, 'new.txt')).readAsStringSync(), 'new\n');
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'edited\n');
+        expect((await service.open(path, 'r')).stashes, isEmpty);
+      });
+
+      test('stashing nothing is refused', () async {
+        final path = ownRepository('stash-empty');
+        await expectLater(
+          service.saveStash(path),
+          throwsA(isA<GitWorkerException>()),
+        );
+      });
+
+      test('cherry-picks a commit from another branch, listing what it can '
+          'pick', () async {
+        final path = ownRepository('pick');
+        git(['checkout', '-q', '-b', 'side'], cwd: path);
+        commitFile(path, 'b.txt', 'bee\n', 'add b');
+        commitFile(path, 'c.txt', 'see\n', 'add c');
+        git(['checkout', '-q', 'main'], cwd: path);
+
+        final offered = await service.unmerged(path, 'side');
+        expect(offered.map((c) => c.summary), ['add c', 'add b']);
+
+        final picked = await service.cherryPick(path, offered.last.id);
+        expect(picked.ok, isTrue);
+        expect(picked.outcome, 'applied');
+        expect(out(path, ['log', '-1', '--format=%s']), 'add b');
+        expect(File(p.join(path, 'b.txt')).existsSync(), isTrue);
+        expect(File(p.join(path, 'c.txt')).existsSync(), isFalse);
+        expect(out(path, ['status', '--porcelain']), isEmpty);
+
+        // Picking it again changes nothing, and says so.
+        final again = await service.cherryPick(path, offered.last.id);
+        expect(again.outcome, 'empty');
+      });
+
+      test('a conflicted cherry-pick is finished from the commit box, with '
+          'an edited message', () async {
+        final path = ownRepository('pick-conflict');
+        git(['checkout', '-q', '-b', 'side'], cwd: path);
+        commitFile(path, 'a.txt', 'theirs\n', 'side edits a');
+        final source = out(path, ['rev-parse', 'HEAD']);
+        git(['checkout', '-q', 'main'], cwd: path);
+        commitFile(path, 'a.txt', 'ours\n', 'main edits a');
+
+        final picked = await service.cherryPick(path, source);
+        expect(picked.outcome, 'conflicted');
+        expect(picked.conflicts, ['a.txt']);
+
+        final during = await service.open(path, 'r');
+        expect(during.inProgress, InProgress.cherryPick);
+        expect(during.inProgressCommit, startsWith(source.substring(0, 8)));
+        expect(during.preparedMessage, contains('side edits a'));
+
+        // Nothing else that moves HEAD is allowed meanwhile.
+        await expectLater(
+          service.checkoutBranch(path, 'side'),
+          throwsA(isA<GitWorkerException>()),
+        );
+        await expectLater(
+          service.commitStaged(path, 'an ordinary commit'),
+          throwsA(isA<GitWorkerException>()),
+        );
+
+        File(p.join(path, 'a.txt')).writeAsStringSync('both\n');
+        await service.setStaged(path, 'a.txt', staged: true);
+        final finished =
+            await service.continueOperation(path, 'both edits of a');
+        expect(finished.ok, isTrue);
+
+        expect(out(path, ['log', '-1', '--format=%s']), 'both edits of a');
+        expect(out(path, ['log', '-1', '--format=%P']).split(' '),
+            hasLength(1));
+        expect((await service.open(path, 'r')).busy, isFalse);
+        expect(out(path, ['status', '--porcelain']), isEmpty);
+      });
+
+      test('a conflicted cherry-pick can be abandoned', () async {
+        final path = ownRepository('pick-abort');
+        git(['checkout', '-q', '-b', 'side'], cwd: path);
+        commitFile(path, 'a.txt', 'theirs\n', 'side edits a');
+        final source = out(path, ['rev-parse', 'HEAD']);
+        git(['checkout', '-q', 'main'], cwd: path);
+        commitFile(path, 'a.txt', 'ours\n', 'main edits a');
+        final head = out(path, ['rev-parse', 'HEAD']);
+
+        await service.cherryPick(path, source);
+        final after = await service.abortOperation(path);
+        expect(after.busy, isFalse);
+        expect(out(path, ['rev-parse', 'HEAD']), head);
+        expect(out(path, ['status', '--porcelain']), isEmpty);
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'ours\n');
+      });
+
+      test('reverts a commit with a new one, as git revert does', () async {
+        final path = ownRepository('revert');
+        commitFile(path, 'b.txt', 'bee\n', 'add b');
+        final bad = out(path, ['rev-parse', 'HEAD']);
+        commitFile(path, 'c.txt', 'see\n', 'add c');
+
+        final reverted = await service.revertCommit(path, bad);
+        expect(reverted.ok, isTrue);
+        expect(File(p.join(path, 'b.txt')).existsSync(), isFalse);
+        expect(File(p.join(path, 'c.txt')).existsSync(), isTrue);
+        expect(out(path, ['log', '-1', '--format=%s']), 'Revert "add b"');
+        expect(out(path, ['status', '--porcelain']), isEmpty);
+      });
+
+      test('a merge commit is not reverted or cherry-picked here', () async {
+        final path = ownRepository('revert-merge');
+        git(['checkout', '-q', '-b', 'side'], cwd: path);
+        commitFile(path, 'b.txt', 'bee\n', 'add b');
+        git(['checkout', '-q', 'main'], cwd: path);
+        commitFile(path, 'c.txt', 'see\n', 'add c');
+        git(['merge', '-q', '--no-edit', 'side'], cwd: path);
+        final merge = out(path, ['rev-parse', 'HEAD']);
+
+        await expectLater(
+          service.revertCommit(path, merge),
+          throwsA(isA<GitWorkerException>()),
+        );
+        expect(out(path, ['rev-parse', 'HEAD']), merge);
+      });
+
+      test('rebases the current branch onto another, as git rebase does',
+          () async {
+        final path = ownRepository('rebase');
+        git(['checkout', '-q', '-b', 'side'], cwd: path);
+        commitFile(path, 'b.txt', 'bee\n', 'add b');
+        commitFile(path, 'c.txt', 'see\n', 'add c');
+        git(['checkout', '-q', 'main'], cwd: path);
+        commitFile(path, 'd.txt', 'dee\n', 'add d');
+        git(['checkout', '-q', 'side'], cwd: path);
+
+        final rebased = await service.rebaseOnto(path, 'main');
+        expect(rebased.ok, isTrue);
+        expect(rebased.outcome, 'done');
+        expect(rebased.replayed, 2);
+
+        expect(out(path, ['symbolic-ref', '--short', 'HEAD']), 'side');
+        expect(
+          out(path, ['log', '--format=%s', 'main..side']).split('\n'),
+          ['add c', 'add b'],
+        );
+        expect(out(path, ['merge-base', 'main', 'side']),
+            out(path, ['rev-parse', 'main']));
+        expect(out(path, ['status', '--porcelain']), isEmpty);
+
+        final again = await service.rebaseOnto(path, 'main');
+        expect(again.outcome, 'alreadyThere');
+      });
+
+      test('a rebase is refused while tracked files have changes', () async {
+        final path = ownRepository('rebase-dirty');
+        git(['branch', 'other'], cwd: path);
+        File(p.join(path, 'a.txt')).writeAsStringSync('mine\n');
+
+        await expectLater(
+          service.rebaseOnto(path, 'other'),
+          throwsA(isA<GitWorkerException>()),
+        );
+        expect(File(p.join(path, 'a.txt')).readAsStringSync(), 'mine\n');
+      });
+
+      /// A branch `side` with two commits, the first of which conflicts with
+      /// `main`, checked out.
+      String conflictedRebase(String name) {
+        final path = ownRepository(name);
+        git(['checkout', '-q', '-b', 'side'], cwd: path);
+        commitFile(path, 'a.txt', 'theirs\n', 'side edits a');
+        commitFile(path, 'b.txt', 'bee\n', 'side adds b');
+        git(['checkout', '-q', 'main'], cwd: path);
+        commitFile(path, 'a.txt', 'ours\n', 'main edits a');
+        git(['checkout', '-q', 'side'], cwd: path);
+        return path;
+      }
+
+      test('a conflicted rebase stops, says where, and continues', () async {
+        final path = conflictedRebase('rebase-continue');
+
+        final stopped = await service.rebaseOnto(path, 'main');
+        expect(stopped.outcome, 'conflicted');
+        expect(stopped.conflicts, ['a.txt']);
+
+        final during = await service.open(path, 'r');
+        expect(during.inProgress, InProgress.rebase);
+        expect(during.inProgressCommit, endsWith('side edits a'));
+        expect(during.rebaseRemaining, 1);
+        expect(during.preparedMessage, contains('side edits a'));
+
+        File(p.join(path, 'a.txt')).writeAsStringSync('both\n');
+        await service.setStaged(path, 'a.txt', staged: true);
+        final finished = await service.continueOperation(path, '');
+        expect(finished.ok, isTrue);
+        expect(finished.outcome, 'done');
+
+        expect((await service.open(path, 'r')).busy, isFalse);
+        expect(out(path, ['symbolic-ref', '--short', 'HEAD']), 'side');
+        expect(
+          out(path, ['log', '--format=%s', 'main..side']).split('\n'),
+          ['side adds b', 'side edits a'],
+        );
+        expect(out(path, ['status', '--porcelain']), isEmpty);
+      });
+
+      test('a conflicted rebase can be abandoned, putting the branch back',
+          () async {
+        final path = conflictedRebase('rebase-abort');
+        final before = out(path, ['rev-parse', 'side']);
+
+        await service.rebaseOnto(path, 'main');
+        final after = await service.abortOperation(path);
+        expect(after.busy, isFalse);
+        expect(out(path, ['rev-parse', 'side']), before);
+        expect(out(path, ['symbolic-ref', '--short', 'HEAD']), 'side');
+        expect(out(path, ['status', '--porcelain']), isEmpty);
+      });
+    });
+
     test('a remote this build cannot reach says so rather than failing later',
         () async {
       final remotes =

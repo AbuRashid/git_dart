@@ -98,6 +98,35 @@ class RepositorySummary {
   final List<String> branches;
   final List<String> tags;
 
+  /// Remote-tracking branches by short name, as in `origin/main`. A remote's
+  /// `HEAD` is left out: it names another entry here rather than a branch.
+  final List<String> remoteBranches;
+
+  /// What each local branch follows, by short name (`origin/main`), for the
+  /// branches that follow anything.
+  final Map<String, String> upstreams;
+
+  /// What stopped on conflicts and is waiting to be finished or abandoned,
+  /// or null (`rewriting.one-thing-in-progress-at-a-time`).
+  final InProgress? inProgress;
+
+  /// The message the commit that finishes it will carry, unless edited.
+  final String? preparedMessage;
+
+  /// The commit being applied, as a short id and its summary, for a
+  /// cherry-pick, revert or rebase.
+  final String? inProgressCommit;
+
+  /// For a rebase, how many commits are still to be replayed after the one
+  /// that stopped.
+  final int rebaseRemaining;
+
+  /// The stash stack, most recent first.
+  final List<StashData> stashes;
+
+  bool get merging => inProgress == InProgress.merge;
+  bool get busy => inProgress != null;
+
   const RepositorySummary({
     required this.path,
     required this.name,
@@ -114,7 +143,40 @@ class RepositorySummary {
     this.untrackedCount = 0,
     this.branches = const [],
     this.tags = const [],
+    this.remoteBranches = const [],
+    this.upstreams = const {},
+    this.inProgress,
+    this.preparedMessage,
+    this.inProgressCommit,
+    this.rebaseRemaining = 0,
+    this.stashes = const [],
   });
+
+  /// The same repository under another display name.
+  RepositorySummary renamed(String name) => RepositorySummary(
+        path: path,
+        name: name,
+        available: available,
+        reason: reason,
+        error: error,
+        branch: branch,
+        detached: detached,
+        headId: headId,
+        headSummary: headSummary,
+        headWhen: headWhen,
+        headAuthor: headAuthor,
+        changedCount: changedCount,
+        untrackedCount: untrackedCount,
+        branches: branches,
+        tags: tags,
+        remoteBranches: remoteBranches,
+        upstreams: upstreams,
+        inProgress: inProgress,
+        preparedMessage: preparedMessage,
+        inProgressCommit: inProgressCommit,
+        rebaseRemaining: rebaseRemaining,
+        stashes: stashes,
+      );
 
   RepositorySummary unavailable(UnavailableReason reason, [String? detail]) =>
       RepositorySummary(
@@ -128,8 +190,7 @@ class RepositorySummary {
   bool get isClean => changedCount == 0 && untrackedCount == 0;
 
   /// Whether the application can offer to create a repository here.
-  bool get canInitialise =>
-      !available && (reason?.offersInitialising ?? false);
+  bool get canInitialise => !available && (reason?.offersInitialising ?? false);
 }
 
 /// One setting as it stands: what is in force, and where it came from.
@@ -339,6 +400,117 @@ class PullOutcome {
   bool get ok => error == null && conflicts.isEmpty;
 }
 
+/// What a checkout did, or why it did not.
+class CheckoutOutcome {
+  /// The repository afterwards. Unchanged when the checkout was refused.
+  final RepositorySummary summary;
+
+  /// Files with uncommitted changes that the checkout would have overwritten.
+  /// Non-empty means nothing was done
+  /// (`branching.a-checkout-that-would-lose-work-is-refused-first`).
+  final List<String> blockedBy;
+
+  /// Files whose mode could not be reproduced on this system.
+  final List<String> degraded;
+
+  const CheckoutOutcome({
+    required this.summary,
+    this.blockedBy = const [],
+    this.degraded = const [],
+  });
+
+  bool get ok => blockedBy.isEmpty;
+}
+
+/// An operation that can stop on conflicts and wait for a person.
+enum InProgress {
+  merge('merge', 'merging'),
+  cherryPick('cherry-pick', 'cherry-picking'),
+  revert('revert', 'reverting'),
+  rebase('rebase', 'rebasing');
+
+  /// As git names it: `git cherry-pick --abort`.
+  final String label;
+
+  /// As a sentence has it: "A cherry-pick is in progress" reads better than
+  /// the noun on a button, and "while cherry-picking" better than both.
+  final String doing;
+
+  const InProgress(this.label, this.doing);
+}
+
+/// What can be run against the working tree and reported afterwards.
+enum Operation {
+  merge,
+  cherryPick,
+  revert,
+  rebase,
+  applyStash,
+  popStash,
+  continueOperation,
+}
+
+/// What a merge, cherry-pick, revert, rebase or stash application did.
+class OperationResult {
+  final Operation operation;
+
+  /// What it was applied from, as the user would name it: a branch, a short
+  /// commit id, `stash@{0}`.
+  final String subject;
+
+  /// `merged`, `fastForward`, `alreadyUpToDate`, `applied`, `empty`, `done`,
+  /// `alreadyThere` or `conflicted`.
+  final String? outcome;
+  final List<String> conflicts;
+
+  /// The commit written, or moved to, when there was one.
+  final String? commit;
+
+  /// For a rebase, how many commits were written.
+  final int replayed;
+
+  final String? error;
+
+  const OperationResult({
+    required this.operation,
+    required this.subject,
+    this.outcome,
+    this.conflicts = const [],
+    this.commit,
+    this.replayed = 0,
+    this.error,
+  });
+
+  bool get ok => error == null && outcome != 'conflicted';
+}
+
+/// One entry in the stash stack.
+class StashData {
+  /// Its place, counted from the most recent: `stash@{index}`.
+  final int index;
+  final String message;
+  final String commit;
+
+  const StashData({
+    required this.index,
+    required this.message,
+    required this.commit,
+  });
+
+  String get name => 'stash@{$index}';
+}
+
+/// How far a reset reaches, named by what it keeps
+/// (`branching.a-reset-says-how-much-it-keeps`).
+enum ResetStrength {
+  soft('Keep the changes, staged'),
+  mixed('Keep the changes, unstaged'),
+  hard('Discard the changes');
+
+  final String label;
+  const ResetStrength(this.label);
+}
+
 /// Where a branch stands against the ref it tracks.
 class TrackingData {
   final String branch;
@@ -397,8 +569,14 @@ class StagingArea {
 
   const StagingArea({required this.rows, this.identity});
 
-  List<StatusRow> get staged => [for (final r in rows) if (r.canUnstage) r];
-  List<StatusRow> get notStaged => [for (final r in rows) if (r.canStage) r];
+  List<StatusRow> get staged => [
+        for (final r in rows)
+          if (r.canUnstage) r
+      ];
+  List<StatusRow> get notStaged => [
+        for (final r in rows)
+          if (r.canStage) r
+      ];
 
   bool get hasStagedChanges => staged.isNotEmpty;
   bool get hasConflicts => rows.any((r) => r.isConflicted);

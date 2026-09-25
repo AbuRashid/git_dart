@@ -371,6 +371,130 @@ gitexplorer @apps/gitexplorer/v0 {
   }
 
   -- ===================================================================
+  -- BRANCHES, TAGS, MERGING AND UNDOING
+  -- ===================================================================
+
+  branching {
+    what "A branch can be created, checked out and merged; a tag can be
+          created and deleted; a branch can be told what it follows; a remote
+          can be renamed; a merge that stopped on conflicts can be finished or
+          abandoned; and changes can be thrown away, or a branch moved back."
+
+    actions [
+      | action          on                                    care
+      | :checkout       "a local branch"                      :reversible
+      | :create-branch  "HEAD, a commit, or a remote branch"  :reversible
+      | :merge          "a local or remote branch"            :reported
+      | :abort-merge    "a merge in progress"                 :confirmed
+      | :set-upstream   "a local branch"                      :reversible
+      | :create-tag     "HEAD or a commit"                    :reversible
+      | :delete-tag     "a tag"                               :confirmed
+      | :rename-remote  "a remote"                            :reversible
+      | :discard        "a tracked file's changes"            :confirmed
+      | :reset          "the current branch, to a commit"     :confirmed
+    ]
+
+    a-checkout-that-would-lose-work-is-refused-first "Switching branches
+         rewrites the files that differ between the two. When one of those has
+         changes that are not committed, the switch is refused and the files
+         are named. Switching anyway is offered, confirmed, and says that
+         those changes will be lost — the same shape as a force push: never
+         assumed, always available."
+
+    a-remote-branch-is-checked-out-as-a-local-one "Checking out
+         `origin/feature` creates `feature` at the same commit, following
+         `origin/feature`, and checks that out. Checking out the remote ref
+         itself would detach HEAD, which is a state people arrive in by
+         accident and commit into by mistake."
+
+    a-merge-in-progress-is-always-visible "A merge that stopped on
+         conflicts leaves the repository in a state the tree alone does not
+         show. The repository pane says so above everything else, for as long
+         as it lasts, with the way out beside it: resolve, stage and commit —
+         the commit box offers the prepared message and records both parents —
+         or abort, which puts the index and working tree back to HEAD."
+
+    discarding-goes-back-to-head "Discarding a file's changes puts it back to
+         how HEAD has it, in the index and on disk. When some of those changes
+         were staged, the dialog says that those go too, rather than keeping a
+         staged version the user may not remember making. It is not offered
+         for an untracked file, whose only copy is the one on disk — that is
+         deleting, which is `editing.not-yet-built`."
+
+    a-reset-says-how-much-it-keeps "Moving the current branch to an earlier
+         commit is offered in git's three strengths, each named by what it
+         keeps: the staged changes (soft), the changes on disk (mixed), or
+         nothing (hard). Only hard can lose work, and its confirmation says
+         so. The commits left behind are not deleted — the reflog and
+         `ORIG_HEAD` still name them."
+
+    renaming-a-remote-keeps-what-it-fetched "A remote's tracking refs, its
+         refspecs, and the branches that follow it all carry its name, and all
+         of them move with a rename. Removing it and adding it back would
+         leave a repository that reads as never having fetched."
+  }
+
+  -- ===================================================================
+  -- STASHING, CHERRY-PICKING, REVERTING AND REBASING
+  -- ===================================================================
+
+  rewriting {
+    what "Changes can be put aside and brought back; a commit from another
+          branch can be applied here; a commit can be undone by a new one; and
+          the current branch can be replayed onto another."
+
+    actions [
+      | action        on                                     care
+      | :stash        "the changes in the working tree"      :reversible
+      | :apply-stash  "a stash, kept afterwards"             :reported
+      | :pop-stash    "a stash, dropped if it applied"       :reported
+      | :drop-stash   "a stash"                              :confirmed
+      | :cherry-pick  "a commit on another branch"           :reported
+      | :revert       "a commit in this branch's history"    :reported
+      | :rebase       "the current branch, onto a branch"    :confirmed
+    ]
+
+    a-clean-tree-first "Applying a stash, cherry-picking, reverting and
+         rebasing all write files into the working tree as though it matched
+         HEAD. Uncommitted changes to tracked files would be written over, so
+         each is refused until they are committed, stashed or discarded — and
+         the refusal names the files."
+
+    one-thing-in-progress-at-a-time "A merge, cherry-pick, revert or rebase
+         that stopped on conflicts is the repository's state until it is
+         finished or abandoned. The banner of
+         `branching.a-merge-in-progress-is-always-visible` covers all four,
+         names which it is, and abandons the right one. Nothing else that
+         moves HEAD — a checkout, a reset, another of the four — is offered
+         meanwhile."
+
+    continuing-is-committing "The commit box finishes whichever operation
+         stopped: it offers the message the stopped commit carried, the
+         message may be edited, and the button says what it will do. For a
+         rebase, the commits after the stopped one are replayed straight
+         away, and may stop again."
+
+    cherry-picking-starts-from-the-branch "The history shows the current
+         branch, whose commits are already here, so a cherry-pick is started
+         from another branch: its menu lists the commits it has that this
+         branch does not."
+
+    a-rebase-is-confirmed "A rebase writes new commits in place of the
+         branch's own, so anyone who already has the old ones will see the
+         branch diverge. That is said before it happens. The old commits
+         remain in the reflog."
+
+    a-merge-is-not-reverted-here "Reverting a merge needs a choice of which
+         parent's side to keep. Until that choice is offered, the action is
+         shown and disabled, with the reason."
+
+    a-conflicted-stash-is-kept "When a stash does not apply cleanly the
+         conflicts are left to resolve like any other, and the stash stays on
+         the list even when it was popped: dropping it would leave the only
+         copy of that work half-merged."
+  }
+
+  -- ===================================================================
   -- PRESENTATION
   -- ===================================================================
 
@@ -582,17 +706,16 @@ gitexplorer @apps/gitexplorer/v0 {
     | "stage and unstage"                             :done
     | "commit"                                        :done
     | "delete, rename and move"                       :next
-    | "branch, checkout and merge"                    :planned
-    | "fetch, pull and push"                          :blocked
+    | "fetch, pull and push"                          :done
+    | "branch, checkout, merge, tag and reset"        :done
+    | "stash, cherry-pick, revert and rebase"         :done
   ]
 
-  the-last-row-is-a-library-limit "Everything above the last row is possible
-                    today, because git_dart implements the object layer, the
-                    index and refs. Fetch and push need the transfer protocols,
-                    which that library describes and does not yet implement, so
-                    the application cannot offer them however much it would
-                    like to. That is a real limit with a known cure, and not a
-                    decision about scope."
+  the-transfer-row-was-a-library-limit "Fetch and push were once marked
+                    blocked, because git_dart did not yet implement the
+                    transfer protocols. It does now, and the row moved when
+                    the library did — which is what distinguished a limit from
+                    a decision about scope."
 
   what-it-is "A git client shaped like a folder explorer. The shape is the
               contribution: the command line is better at almost everything
