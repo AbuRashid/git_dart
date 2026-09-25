@@ -1,0 +1,24 @@
+# Publishes git_dart to pub.dev when a `v<version>` tag is pushed.
+#
+# No credentials are stored: pub.dev is told to trust this repository and this
+# tag pattern, and the workflow authenticates with a short-lived OIDC token.
+# Enable it once on https://pub.dev/packages/git_dart/admin — automated
+# publishing, repository AbuRashid/git_dart, tag pattern `v{{version}}` —
+# without which the run fails rather than publishing.
+#
+# pub.dev also checks that the tag's version matches the pubspec, which is the
+# mistake worth catching: the version lives in pubspec.yaml, in
+# lib/src/version.dart and in the tag, and they have to agree.
+name: publish
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+
+jobs:
+  publish:
+    permissions:
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    with:
+      working-directory: packages/git_dart

@@ -1,0 +1,131 @@
+# Builds the explorer for every desktop and mobile target and attaches the
+# results to a GitHub Release.
+#
+# Triggered by an `app-v*` tag rather than `v*`, which belongs to the package:
+# the two are released on their own schedules and a tag that meant both would
+# publish a library every time the application shipped.
+#
+# Nothing here is code-signed. An Android APK is signed with the debug key,
+# which is what this project's gradle config asks for; Windows and macOS
+# builds are unsigned, so their systems will warn (macOS refuses until the
+# user allows it explicitly). Signing needs secrets and, on macOS, a paid
+# Apple account — worth adding when the audience is wider than people who can
+# be told how to open it.
+name: release
+
+on:
+  push:
+    tags: ['app-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android-and-linux:
+    name: Android and Linux
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/gitexplorer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libstdc++-12-dev
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - run: flutter build linux --release
+      - name: Name the artefacts after the tag
+        run: |
+          version="${GITHUB_REF_NAME#app-v}"
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             "gitexplorer-$version-android.apk"
+          tar -C build/linux/x64/release/bundle -czf \
+             "gitexplorer-$version-linux-x64.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-and-linux
+          path: apps/gitexplorer/gitexplorer-*
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/gitexplorer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Zip the build
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^app-v', ''
+          Compress-Archive -Path build/windows/x64/runner/Release/* `
+            -DestinationPath "gitexplorer-$version-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: apps/gitexplorer/gitexplorer-*.zip
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/gitexplorer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - name: Zip the app bundle
+        run: |
+          version="${GITHUB_REF_NAME#app-v}"
+          # The bundle's name comes from the Xcode target rather than from
+          # anything this workflow sets, so it is found rather than assumed.
+          app=$(find build/macos/Build/Products/Release -maxdepth 1 \
+            -name '*.app' | head -1)
+          # ditto rather than zip: it keeps the bundle's symlinks and
+          # resource forks, which a plain zip flattens into something macOS
+          # will not open.
+          ditto -c -k --keepParent "$app" "gitexplorer-$version-macos.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: apps/gitexplorer/gitexplorer-*.zip
+
+  publish:
+    name: Attach to the release
+    needs: [android-and-linux, windows, macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/app-v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artefacts/**/gitexplorer-*
+          draft: true
+          body: |
+            Built from ${{ github.ref_name }}.
+
+            These builds are not code-signed. Windows will warn before
+            running one, and macOS will refuse until you allow it in
+            System Settings → Privacy & Security.

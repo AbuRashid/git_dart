@@ -1,0 +1,45 @@
+# The two suites, on every push and pull request.
+#
+# Both build real repositories with the `git` on the runner and compare this
+# code against it, which is the property worth protecting and the reason these
+# run on a machine rather than only on a laptop.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  git_dart:
+    name: git_dart
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/git_dart
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - run: dart analyze --fatal-infos
+      - run: dart test
+
+  explorer:
+    name: gitexplorer
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/gitexplorer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: dart analyze --fatal-infos lib test
+      # The generated tokens are checked against the specification rather than
+      # trusted: a hand edit to the artefact must not survive.
+      - run: dart run tool/generate_tokens.dart --check
+      # One at a time: each test builds repositories on disk with real git.
+      - run: flutter test --concurrency=1
