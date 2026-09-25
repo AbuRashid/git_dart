@@ -84,11 +84,22 @@ class RepositoryStatus {
   /// modified here, and saying nothing would pass that off as equality.
   final List<String> unnormalised;
 
+  /// Tracked paths whose names are not valid UTF-8, as they render — with
+  /// replacement characters where the bad bytes were.
+  ///
+  /// Such a name cannot be addressed by the string that shows it: two
+  /// different names can render identically, and encoding the rendering back
+  /// produces different bytes. They are listed so that whatever is showing
+  /// the repository can say so, rather than offering an action that would
+  /// reach the wrong file or none (`IndexEntry.rawPath`).
+  final List<String> unrepresentable;
+
   const RepositoryStatus({
     required this.entries,
     required this.branch,
     required this.isUnborn,
     this.unnormalised = const [],
+    this.unrepresentable = const [],
   });
 
   bool get isClean => entries.every((e) => e.isUntracked);
@@ -307,6 +318,10 @@ RepositoryStatus statusOf(
     branch: repo.refs.currentBranch,
     isUnborn: headId == null,
     unnormalised: repo.pathsNotNormalised.skip(skippedBefore).toList(),
+    unrepresentable: [
+      for (final entry in index.entries)
+        if (!entry.pathIsText) entry.path,
+    ],
   );
 }
 

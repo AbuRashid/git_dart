@@ -2,6 +2,20 @@
 
 ## 0.4.0
 
+- A path that is not valid UTF-8 survives the index. `IndexEntry` keeps the
+  name's bytes (`rawPath`), renders them for display (`path`), and says
+  whether the rendering is faithful (`pathIsText`); entries sort by bytes, as
+  git sorts them. Reading an index and writing it back used to replace each
+  bad byte with U+FFFD and encode that, which renamed the file — silently,
+  during whatever unrelated operation happened to rewrite the index.
+- A repaired name no longer addresses a file. `Tree.entryNamed` and
+  `Repository.lookup` compare bytes, so two names that render alike — `78 ff`
+  and `78 fe` both show as `x` followed by U+FFFD — are no longer the same
+  key, and a name a string cannot spell is reached through
+  `Tree.entryWithRawName` or `Repository.lookupRaw` instead of by whichever
+  entry happened to come first. `status` lists such tracked paths in
+  `unrepresentable`, so a caller can say so rather than offering an action
+  that would reach the wrong file.
 - A repository can be opened for inspection:
   `Repository.open(path, access: RepositoryAccess.inspection)`. Nothing the
   repository's own configuration names is run — no `filter.<driver>` command,

@@ -151,10 +151,29 @@ class Tree extends GitObject {
     return builder.takeBytes();
   }
 
-  TreeEntry? entryNamed(String name) {
+  /// The entry whose name is exactly [name], compared as bytes.
+  ///
+  /// Compared as bytes rather than as text because two different names can
+  /// render as the same string: a tree may hold both `78 ff` and `78 fe`, and
+  /// both display as `x` followed by U+FFFD. Matching on what is displayed
+  /// would hand back whichever came first — a lookup that quietly addresses a
+  /// different file. A name that cannot be spelled exactly by a Dart string
+  /// is therefore not found by one; [entryWithRawName] finds it.
+  TreeEntry? entryNamed(String name) => entryWithRawName(utf8.encode(name));
+
+  /// The entry whose stored name is exactly [rawName].
+  TreeEntry? entryWithRawName(List<int> rawName) {
     for (final entry in entries) {
-      if (entry.name == name) return entry;
+      if (_sameBytes(entry.rawName, rawName)) return entry;
     }
     return null;
+  }
+
+  static bool _sameBytes(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 }

@@ -51,16 +51,62 @@ class IndexEntry {
   final int size;
   final ObjectId id;
 
-  /// The path, always with forward slashes, relative to the working tree root.
-  final String path;
+  /// The path as stored: raw bytes, with forward slashes, relative to the
+  /// working tree root.
+  ///
+  /// Git does not require a path to be valid UTF-8, and a name that is not
+  /// has no faithful rendering as a Dart string: decoding replaces each bad
+  /// byte with U+FFFD, and encoding that back produces different bytes. An
+  /// index read and written again would then rename the file — silently, and
+  /// without anyone having asked for a rename. So the bytes are what an entry
+  /// holds, and [path] renders them.
+  final Uint8List rawPath;
+
+  /// The path as text, with any invalid bytes replaced.
+  ///
+  /// Good enough to show, and to compare with other text. Not good enough to
+  /// address the entry by, which is what [rawPath] is for.
+  String get path => utf8.decode(rawPath, allowMalformed: true);
+
+  /// Whether [path] is faithful — whether the name survives being made into
+  /// text and back. False for a name this platform's strings cannot carry.
+  bool get pathIsText {
+    final again = utf8.encode(path);
+    if (again.length != rawPath.length) return false;
+    for (var i = 0; i < again.length; i++) {
+      if (again[i] != rawPath[i]) return false;
+    }
+    return true;
+  }
 
   final MergeStage stage;
   final bool assumeValid;
   final bool intentToAdd;
   final bool skipWorktree;
 
-  const IndexEntry({
-    required this.path,
+  IndexEntry({
+    required String path,
+    required this.id,
+    required this.mode,
+    this.ctimeSeconds = 0,
+    this.ctimeNanoseconds = 0,
+    this.mtimeSeconds = 0,
+    this.mtimeNanoseconds = 0,
+    this.device = 0,
+    this.inode = 0,
+    this.uid = 0,
+    this.gid = 0,
+    this.size = 0,
+    this.stage = MergeStage.ordinary,
+    this.assumeValid = false,
+    this.intentToAdd = false,
+    this.skipWorktree = false,
+  }) : rawPath = utf8.encode(path);
+
+  /// An entry for a path whose bytes are known, which is how one read from an
+  /// index keeps its name exactly.
+  IndexEntry.raw({
+    required this.rawPath,
     required this.id,
     required this.mode,
     this.ctimeSeconds = 0,
@@ -221,10 +267,9 @@ class GitIndex {
         at = start + ((at - start + 8) & ~7);
       }
       previousPath = pathBytes;
-      final path = utf8.decode(pathBytes, allowMalformed: true);
 
-      entries.add(IndexEntry(
-        path: path,
+      entries.add(IndexEntry.raw(
+        rawPath: Uint8List.fromList(pathBytes),
         id: id,
         mode: mode,
         ctimeSeconds: ctimeSeconds,
@@ -293,7 +338,7 @@ class GitIndex {
     builder.add(header.buffer.asUint8List());
 
     for (final entry in sorted) {
-      final pathBytes = utf8.encode(entry.path);
+      final pathBytes = entry.rawPath;
       // An entry needs the extended field only if it has something to say in
       // it; a v3 index may hold plain entries alongside extended ones.
       final extended = entry.intentToAdd || entry.skipWorktree;
@@ -363,8 +408,16 @@ class GitIndex {
   }
 
   static int _compare(IndexEntry a, IndexEntry b) {
-    final byPath = a.path.compareTo(b.path);
-    return byPath != 0 ? byPath : a.stage.value - b.stage.value;
+    // By bytes, which is the order git keeps and the only order that is
+    // defined for a name that is not text.
+    final left = a.rawPath;
+    final right = b.rawPath;
+    final shorter = left.length < right.length ? left.length : right.length;
+    for (var i = 0; i < shorter; i++) {
+      if (left[i] != right[i]) return left[i] - right[i];
+    }
+    if (left.length != right.length) return left.length - right.length;
+    return a.stage.value - b.stage.value;
   }
 
   IndexEntry? entryFor(String path,

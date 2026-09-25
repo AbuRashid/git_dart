@@ -804,13 +804,30 @@ class Repository {
 
   /// Walks [path] from [tree], returning the entry it names, or null.
   /// Path segments are separated by forward slashes, as git stores them.
-  TreeEntry? lookup(Tree tree, String path) {
-    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+  TreeEntry? lookup(Tree tree, String path) =>
+      lookupRaw(tree, utf8.encode(path));
+
+  /// [lookup] by the path's bytes, for a name no string can spell exactly.
+  ///
+  /// Git does not require a path to be valid UTF-8. Such a name renders with
+  /// replacement characters, and two different names can render alike, so
+  /// addressing by the rendering can reach the wrong file. This addresses by
+  /// what is stored.
+  TreeEntry? lookupRaw(Tree tree, List<int> rawPath) {
+    const slash = 0x2f;
+    final segments = <List<int>>[];
+    var start = 0;
+    for (var i = 0; i <= rawPath.length; i++) {
+      if (i == rawPath.length || rawPath[i] == slash) {
+        if (i > start) segments.add(rawPath.sublist(start, i));
+        start = i + 1;
+      }
+    }
     if (segments.isEmpty) return null;
 
     var current = tree;
     for (var i = 0; i < segments.length; i++) {
-      final entry = current.entryNamed(segments[i]);
+      final entry = current.entryWithRawName(segments[i]);
       if (entry == null) return null;
       if (i == segments.length - 1) return entry;
       if (!entry.mode.isTree) return null;
