@@ -56,6 +56,46 @@ class UnsupportedObjectFormatException implements Exception {
       'format, which this library does not read; it reads sha1 repositories';
 }
 
+/// What a repository may do while it is open.
+///
+/// A repository is not only data. Its own configuration can name programs —
+/// `filter.<driver>.clean`, a signing tool, the hooks in its directory — and
+/// git runs them, which is what makes git a client rather than a viewer. A
+/// tool that opens repositories it did not create is in a different
+/// position: someone who can write a `.git/config` should not thereby be able
+/// to run a command on the machine of whoever looks at it.
+enum RepositoryAccess {
+  /// Everything git does: hooks, configured filter drivers, signing and
+  /// verification tools, and writes. What a client needs.
+  full,
+
+  /// Reading only, and nothing the repository's own configuration names.
+  ///
+  /// No program from the config is run, no hook fires, nothing is written —
+  /// not an object, not a ref, not the index, not a file in the working
+  /// tree — and no network operation starts. In-process filter drivers the
+  /// caller registered itself still run: those are the caller's own code,
+  /// not the repository's.
+  ///
+  /// Where a configured clean filter would have been applied, status says so
+  /// instead of pretending the comparison was normalised
+  /// (`RepositoryStatus.unnormalised`).
+  inspection,
+}
+
+/// Thrown when a repository opened for inspection is asked to change
+/// something, or to run something its configuration names.
+class RepositoryIsReadOnly implements Exception {
+  /// What was refused, as a phrase: "writing an object", "moving a ref".
+  final String doing;
+
+  const RepositoryIsReadOnly(this.doing);
+
+  @override
+  String toString() =>
+      '$doing was refused: this repository is open for inspection only';
+}
+
 /// A repository: an object store, a ref namespace over it, and — unless bare —
 /// an index and a working tree.
 class Repository {
@@ -85,14 +125,18 @@ class Repository {
     required this.workTree,
     required this.objects,
     required this.refs,
+    this.access = RepositoryAccess.full,
   });
 
   /// Opens the repository containing [path], searching upwards.
   ///
   /// Throws when there is none — a caller that wants to test should use
   /// [discover], which returns null.
-  factory Repository.open(String path) {
-    final found = Repository.discover(path);
+  factory Repository.open(
+    String path, {
+    RepositoryAccess access = RepositoryAccess.full,
+  }) {
+    final found = Repository.discover(path, access: access);
     if (found == null) {
       throw ArgumentError.value(path, 'path', 'not inside a git repository');
     }
@@ -100,7 +144,10 @@ class Repository {
   }
 
   /// The repository containing [path], or null.
-  static Repository? discover(String path) {
+  static Repository? discover(
+    String path, {
+    RepositoryAccess access = RepositoryAccess.full,
+  }) {
     var directory = fs.directory(p.absolute(path));
     while (true) {
       final candidate = p.join(directory.path, '.git');
@@ -109,7 +156,11 @@ class Repository {
       // reporting 1242 untracked files in a directory git said was not a
       // repository at all.
       if (_looksLikeGitDirectory(candidate)) {
-        return Repository.at(candidate, workTree: directory.path);
+        return Repository.at(
+          candidate,
+          workTree: directory.path,
+          access: access,
+        );
       }
       if (fs.file(candidate).existsSync()) {
         // A `.git` file rather than a directory: a worktree or a submodule
@@ -119,7 +170,11 @@ class Repository {
           final target = text.substring(7).trim();
           final resolved =
               p.isAbsolute(target) ? target : p.join(directory.path, target);
-          return Repository.at(resolved, workTree: directory.path);
+          return Repository.at(
+            resolved,
+            workTree: directory.path,
+            access: access,
+          );
         }
       }
       // A bare repository is its own git directory.
@@ -155,16 +210,35 @@ class Repository {
       fs.directory(p.join(path, 'refs')).existsSync();
 
   /// Opens a known git directory without searching.
-  factory Repository.at(String gitDirectory, {String? workTree}) {
+  factory Repository.at(
+    String gitDirectory, {
+    String? workTree,
+    RepositoryAccess access = RepositoryAccess.full,
+  }) {
     final commonDirectory = _commonDirectoryOf(gitDirectory);
-    final refs = RefStore(gitDirectory, commonDirectory: commonDirectory);
+    final readOnly = access == RepositoryAccess.inspection;
+    final refs = RefStore(
+      gitDirectory,
+      commonDirectory: commonDirectory,
+      readOnly: readOnly,
+    );
     final repository = Repository._(
       gitDirectory: gitDirectory,
       commonDirectory: commonDirectory,
       workTree: workTree,
-      objects: ObjectStore.open(p.join(commonDirectory, 'objects')),
+      objects: ObjectStore.open(
+        p.join(commonDirectory, 'objects'),
+        readOnly: readOnly,
+      ),
       refs: refs,
+      access: access,
     );
+    // The two things a repository's own configuration can make happen, both
+    // turned off rather than trusted to be absent.
+    if (readOnly) {
+      repository.hooks = HookRunner.none;
+      repository.signatureTool = const SignatureTool.none();
+    }
     // The store asks at the moment of a move, so the timestamp is the move's
     // own and a config edited mid-session is picked up.
     refs.identityFor = repository.identityFromConfig;
@@ -192,6 +266,22 @@ class Repository {
   /// their place. Commits, merges, checkouts, rebases and pushes all ask this
   /// runner, at the points git runs the same hooks.
   HookRunner hooks = HookRunner.disk;
+
+  /// What this repository is allowed to do (`RepositoryAccess`).
+  final RepositoryAccess access;
+
+  /// Whether this repository was opened for inspection only.
+  bool get isInspectionOnly => access == RepositoryAccess.inspection;
+
+  /// Refuses when this repository is open for inspection.
+  ///
+  /// Called by everything that changes the repository. The stores refuse as
+  /// well, so a path that forgets to ask still cannot write; this exists so
+  /// the refusal names what was being attempted rather than what it was
+  /// about to do underneath.
+  void requireWritable(String doing) {
+    if (isInspectionOnly) throw RepositoryIsReadOnly(doing);
+  }
 
   /// What makes and checks signatures for this repository.
   ///
@@ -397,7 +487,20 @@ class Repository {
     config: config,
     workTree: workTree,
     registered: filters,
+    // Under inspection the configured commands are not run. What the caller
+    // registered itself still is: that is the caller's own code, and the
+    // point of the policy is the repository's.
+    runConfiguredCommands: !isInspectionOnly,
   );
+
+  /// Paths whose configured filter driver was not run, because this
+  /// repository is open for inspection.
+  ///
+  /// A comparison made without the filter git would have applied is not the
+  /// comparison git would have made. Status reports these rather than letting
+  /// the difference pass for equality.
+  List<String> get pathsNotNormalised =>
+      _contentFilters.skippedConfiguredDrivers;
 
   /// [raw], read from the working tree at [path], in the form git stores:
   /// the filter driver's clean step, then line-ending conversion.
@@ -912,6 +1015,7 @@ class Repository {
     bool detach = false,
     bool runHooks = true,
   }) {
+    requireWritable('checking out $revision');
     final id = resolve(revision);
     if (id == null) {
       throw ArgumentError.value(revision, 'revision', 'names no object here');
@@ -1114,6 +1218,7 @@ class Repository {
 
   /// Creates a branch at [at], or at HEAD.
   void createBranch(String name, {ObjectId? at}) {
+    requireWritable('creating the branch $name');
     final problem = branchNameProblem(name);
     if (problem != null) throw ArgumentError.value(name, 'name', problem);
     final path = name.startsWith('refs/') ? name : 'refs/heads/$name';
@@ -1330,6 +1435,7 @@ class Repository {
   /// Appending a second section instead gives `branch.<branch>.merge` two
   /// values, which git reads as a request to merge both.
   void setUpstream(String branch, String remote, String ref) {
+    requireWritable('recording what $branch follows');
     if (refs.read('refs/heads/$branch') == null) {
       throw StateError('no branch named $branch');
     }
@@ -1639,6 +1745,7 @@ class Repository {
   ///
   /// A directory stages everything under it that is not ignored.
   void stage(String path) {
+    requireWritable('staging $path');
     final workTree = this.workTree;
     if (workTree == null) {
       throw StateError('a bare repository has no working tree to stage from');
@@ -1739,6 +1846,7 @@ class Repository {
   /// Puts HEAD's version of [path] back in the index, or removes the entry
   /// when HEAD has no such path. The working tree is not touched.
   void unstage(String path) {
+    requireWritable('unstaging $path');
     final index = this.index ?? GitIndex.empty();
     final entries = [...index.entries];
 

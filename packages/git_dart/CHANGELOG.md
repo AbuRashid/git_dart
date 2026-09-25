@@ -2,6 +2,17 @@
 
 ## 0.4.0
 
+- A repository can be opened for inspection:
+  `Repository.open(path, access: RepositoryAccess.inspection)`. Nothing the
+  repository's own configuration names is run — no `filter.<driver>` command,
+  no hook, no signing or verifying program — nothing is written, and fetch
+  and push are refused. A repository's `.git/config` can name programs, and
+  git runs them; anything that opens repositories it did not create needs to
+  be able to decline that without enumerating every driver. Filter drivers
+  the caller registered itself still run: those are the caller's code, not
+  the repository's. Where a configured filter was skipped, `status` lists the
+  path in `unnormalised` rather than passing an unnormalised comparison off
+  as an ordinary one.
 - Long reads can be told to stop. `Cancellation` is asked between units of
   work — one commit, one file — by `log`, `status`, `blame` and
   `fileHistory`, which throw `CancelledException` rather than returning a

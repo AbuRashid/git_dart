@@ -112,8 +112,24 @@ class RefStore {
   /// record and is not one.
   Identity? Function()? identityFor;
 
-  RefStore(this.gitDirectory, {String? commonDirectory, this.identityFor})
-      : commonDirectory = commonDirectory ?? gitDirectory;
+  /// Whether this store refuses to move anything. Set for a repository
+  /// opened for inspection.
+  final bool readOnly;
+
+  RefStore(
+    this.gitDirectory, {
+    String? commonDirectory,
+    this.identityFor,
+    this.readOnly = false,
+  }) : commonDirectory = commonDirectory ?? gitDirectory;
+
+  void _requireWritable(String doing) {
+    if (readOnly) {
+      throw StateError(
+        '$doing was refused: these refs are open for inspection',
+      );
+    }
+  }
 
   /// The names that belong to one worktree rather than to the repository.
   ///
@@ -255,6 +271,7 @@ class RefStore {
   /// second writer fails rather than quietly racing the first — rename alone
   /// makes each write whole, not each write the only one.
   void write(String refPath, ObjectId id, {String? reflogMessage}) {
+    _requireWritable('moving $refPath');
     final before = _currentValueOf(refPath);
     _writeAtomically(refPath, '${id.hex}\n');
     _log(refPath, before, id, reflogMessage);
@@ -274,6 +291,7 @@ class RefStore {
     required ObjectId to,
     String? reflogMessage,
   }) {
+    _requireWritable('moving $refPath');
     final found = _currentValueOf(refPath);
     if (found != expected) {
       throw RefRaceException(refPath, expected, found);
@@ -289,6 +307,7 @@ class RefStore {
   /// paths: a checkout is a move from one commit to another, and that is what
   /// makes the previous position recoverable.
   void writeSymbolic(String refPath, String target, {String? reflogMessage}) {
+    _requireWritable('pointing $refPath at $target');
     final before = resolve(refPath);
     _writeAtomically(refPath, 'ref: $target\n');
     final after = resolve(refPath);
@@ -445,6 +464,7 @@ class RefStore {
   /// loose file does nothing at all and the ref appears to come back. So the
   /// packed file is rewritten too, whole and atomically.
   bool delete(String refPath) {
+    _requireWritable('deleting $refPath');
     // The log goes with the ref: it records where *this* ref has been, and a
     // later ref of the same name has not been anywhere.
     deleteReflog(refPath);

@@ -108,6 +108,7 @@ Future<FetchResult> fetch(
   int? depth,
   String? filter,
 }) async {
+  repository.requireWritable('fetching from ${remote.name}');
   if (remote.isLocal) {
     if (filter != null) {
       // The same reasoning as a depth: a local fetch copies objects rather

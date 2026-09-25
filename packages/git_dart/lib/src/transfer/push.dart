@@ -131,6 +131,7 @@ Future<PushResult> push(
   String sshCommand = 'ssh',
   bool noVerify = false,
 }) async {
+  repository.requireWritable('pushing to ${remote.name}');
   final names = branches ??
       [
         if (repository.refs.currentBranch case final current?)

@@ -300,6 +300,15 @@ abstract class SignatureTool {
   /// otherwise a tool whose every call throws [UnsupportedError].
   static SignatureTool get platformDefault => impl.platformSignatureTool;
 
+  /// A tool that runs nothing.
+  ///
+  /// Signing throws, and verification reports that the signature could not be
+  /// checked — which is true, and is what a repository opened for inspection
+  /// gets: checking a signature means running gpg or ssh-keygen, and which
+  /// one, from where, is something the repository's own configuration has a
+  /// say in.
+  const factory SignatureTool.none() = _NoSignatureTool;
+
   /// A detached, armoured signature over [payload], with LF line endings and
   /// a final newline. Throws when signing fails.
   String sign(Uint8List payload, SigningRequest request);
@@ -637,4 +646,28 @@ String stripSpace(String text) {
       ..write('\n');
   }
   return out.toString();
+}
+
+class _NoSignatureTool implements SignatureTool {
+  const _NoSignatureTool();
+
+  @override
+  String sign(Uint8List payload, SigningRequest request) =>
+      throw UnsupportedError(
+        'this repository is open for inspection, so nothing is signed here',
+      );
+
+  @override
+  SignatureCheck verify(
+    Uint8List payload,
+    String signature,
+    VerificationRequest request,
+  ) =>
+      SignatureCheck(
+        result: SignatureStatus.cannotCheck,
+        payload: payload,
+        signature: signature,
+        output: 'not checked: this repository is open for inspection, and '
+            'checking a signature means running a program',
+      );
 }

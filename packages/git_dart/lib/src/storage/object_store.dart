@@ -28,10 +28,15 @@ class ObjectStore {
   final List<PackFile> packs;
   final List<ObjectStore> alternates;
 
+  /// Whether this store refuses to write. Set for a repository opened for
+  /// inspection, so that a path which forgot to ask still cannot write.
+  final bool readOnly;
+
   ObjectStore({
     required this.loose,
     required this.packs,
     this.alternates = const [],
+    this.readOnly = false,
   }) {
     for (final pack in packs) {
       pack.externalBase = (id) {
@@ -43,14 +48,15 @@ class ObjectStore {
   }
 
   /// Opens the store rooted at an `objects` directory, following alternates.
-  factory ObjectStore.open(String objectsDirectory) {
+  factory ObjectStore.open(String objectsDirectory, {bool readOnly = false}) {
     return ObjectStore(
       loose: LooseObjectStore(objectsDirectory),
       packs: openPacks(objectsDirectory),
       alternates: [
         for (final path in readAlternates(objectsDirectory))
-          ObjectStore.open(path),
+          ObjectStore.open(path, readOnly: readOnly),
       ],
+      readOnly: readOnly,
     );
   }
 
@@ -140,7 +146,14 @@ class ObjectStore {
     return object;
   }
 
-  ObjectId write(GitObject object) => loose.write(object);
+  ObjectId write(GitObject object) {
+    if (readOnly) {
+      throw StateError(
+        'writing an object was refused: this store is open for inspection',
+      );
+    }
+    return loose.write(object);
+  }
 
   /// Stores a packfile whole, alongside an index built for it, and makes it
   /// readable straight away.

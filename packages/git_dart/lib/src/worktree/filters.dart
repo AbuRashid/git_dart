@@ -122,10 +122,22 @@ class ContentFilters {
 
   final Map<String, FilterDriver> registered;
 
+  /// Whether a driver named only by the repository's configuration may be
+  /// run. False for a repository opened for inspection: the commands are the
+  /// repository's, and whoever wrote them is not necessarily whoever is
+  /// reading it.
+  final bool runConfiguredCommands;
+
+  /// Paths whose configured driver was not run because of that, in the order
+  /// they were met. A caller comparing content has to know that what it
+  /// compared was not normalised the way git would have normalised it.
+  final List<String> skippedConfiguredDrivers = [];
+
   ContentFilters({
     required this.config,
     required this.workTree,
     required this.registered,
+    this.runConfiguredCommands = true,
   });
 
   /// The driver name `filter=<name>` gives in [attributes], or null.
@@ -164,6 +176,15 @@ class ContentFilters {
     // No driver configured is not an error: the attribute names a filter
     // this repository does not have, and git passes the content through.
     if (command == null || command.isEmpty) return content;
+
+    if (!runConfiguredCommands) {
+      // The content goes through unchanged, and the path is remembered: a
+      // comparison made without the filter git would have applied is not the
+      // comparison git would have made, and saying nothing would imply it
+      // was.
+      skippedConfiguredDrivers.add(path);
+      return content;
+    }
 
     final result = runFilterCommand(
       command.replaceAll('%f', _shellQuote(path)),

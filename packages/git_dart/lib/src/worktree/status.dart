@@ -74,10 +74,21 @@ class RepositoryStatus {
   /// the index is an addition rather than a modification.
   final bool isUnborn;
 
+  /// Paths compared without the filter driver their attributes name,
+  /// because this repository is open for inspection and the driver is a
+  /// command its own configuration supplies.
+  ///
+  /// Empty for an ordinary repository. Non-empty means those paths were
+  /// compared byte for byte against what is stored, which is not what git
+  /// would have compared — a file that git calls unchanged may be listed as
+  /// modified here, and saying nothing would pass that off as equality.
+  final List<String> unnormalised;
+
   const RepositoryStatus({
     required this.entries,
     required this.branch,
     required this.isUnborn,
+    this.unnormalised = const [],
   });
 
   bool get isClean => entries.every((e) => e.isUntracked);
@@ -127,6 +138,9 @@ RepositoryStatus statusOf(
   }
 
   final index = repo.index ?? GitIndex.empty();
+  // What this walk itself could not normalise, rather than everything the
+  // repository has skipped since it was opened.
+  final skippedBefore = repo.pathsNotNormalised.length;
   final indexFile = fs.file(p.join(repo.gitDirectory, 'index'));
   final indexWrittenAt =
       indexFile.existsSync() ? indexFile.statSync().modified : null;
@@ -292,6 +306,7 @@ RepositoryStatus statusOf(
     entries: entries,
     branch: repo.refs.currentBranch,
     isUnborn: headId == null,
+    unnormalised: repo.pathsNotNormalised.skip(skippedBefore).toList(),
   );
 }
 
