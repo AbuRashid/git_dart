@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
+import 'cancellation.dart';
 import 'config/config_writer.dart';
 import 'config/git_config.dart';
 import 'diff/text_diff.dart';
@@ -761,6 +762,7 @@ class Repository {
     ObjectId? start,
     int? limit,
     Set<ObjectId>? excluding,
+    Cancellation? cancel,
   }) sync* {
     final from = start ?? headId;
     if (from == null) return;
@@ -778,6 +780,9 @@ class Repository {
 
     var emitted = 0;
     while (queue.isNotEmpty) {
+      // One commit is the unit: the walk stops here rather than at the end of
+      // a history nobody is reading any more.
+      checkCancelled(cancel, 'the history walk');
       final commit = queue.first;
       queue.remove(commit);
 
@@ -876,6 +881,7 @@ class Repository {
     bool detectRenames = true,
     int renameThreshold = 50,
     int renameLimit = 1000,
+    Cancellation? cancel,
   }) =>
       statusOf(
         this,
@@ -885,6 +891,7 @@ class Repository {
         detectRenames: detectRenames,
         renameThreshold: renameThreshold,
         renameLimit: renameLimit,
+        cancel: cancel,
       );
 
   /// Checks out [revision]: the working tree and the index are made to match

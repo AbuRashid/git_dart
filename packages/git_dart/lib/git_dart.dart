@@ -10,6 +10,7 @@
 /// have every call pay for a Future.
 library;
 
+export 'src/cancellation.dart';
 export 'src/config/config_writer.dart';
 export 'src/config/git_config.dart';
 export 'src/diff/blame.dart';

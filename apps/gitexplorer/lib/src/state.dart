@@ -136,6 +136,39 @@ class ExplorerState extends ChangeNotifier {
   FileDiff? get commitFileDiff => _commitFileDiff;
   String? get commitFilePath => _commitFilePath;
 
+  /// The reads that a later selection can make pointless, by what they are
+  /// reading for: one open file, one blame, one history.
+  ///
+  /// Navigation abandons work constantly — a file opened and left before it
+  /// answered, a blame asked for and navigated away from. Dropping the answer
+  /// is easy and is not the point: without cancelling, the worker finishes
+  /// every one of them and the next thing the user asked for waits behind
+  /// work nobody wants (`006`).
+  final _running = <String, void Function()>{};
+
+  /// Starts [run] as the only read of [kind] that matters, stopping whichever
+  /// one held that name before it.
+  Future<T> _onlyOne<T>(
+    String kind,
+    Future<T> Function(int cancelHandle) run,
+  ) {
+    _running.remove(kind)?.call();
+    final request = _git.cancellable(run);
+    _running[kind] = request.cancel;
+    return request.result.whenComplete(() {
+      if (identical(_running[kind], request.cancel)) _running.remove(kind);
+    });
+  }
+
+  /// Stops every read still in flight. Called when the window is going away,
+  /// and when a repository leaves the tree.
+  void cancelReads() {
+    for (final cancel in _running.values) {
+      cancel();
+    }
+    _running.clear();
+  }
+
   RepositorySummary? summaryFor(String path) => _summaries[path];
   Revision revisionFor(String path) => _revisions[path] ?? Revision.workingTree;
   bool isExpanded(String repository, String path) =>
@@ -169,6 +202,7 @@ class ExplorerState extends ChangeNotifier {
 
   @override
   void dispose() {
+    cancelReads();
     _git.dispose();
     super.dispose();
   }
@@ -1207,7 +1241,17 @@ class ExplorerState extends ChangeNotifier {
     try {
       _staging = await _git.staging(repositoryPath);
       _remotes = await _git.remotes(repositoryPath);
-      _history = await _git.history(repositoryPath, limit: 200);
+      _history = await _onlyOne(
+        'history',
+        (handle) => _git.history(
+          repositoryPath,
+          limit: 200,
+          cancelHandle: handle,
+        ),
+      );
+    } on RequestCancelled {
+      // The history of a repository that is no longer the one selected.
+      return;
     } on GitWorkerException catch (failure) {
       _error = failure.message;
     }
@@ -1226,7 +1270,15 @@ class ExplorerState extends ChangeNotifier {
     notifyListeners();
 
     try {
-      _fileContent = await _git.file(repositoryPath, revision, path);
+      _fileContent = await _onlyOne(
+        'file',
+        (handle) => _git.file(
+          repositoryPath,
+          revision,
+          path,
+          cancelHandle: handle,
+        ),
+      );
       // A diff is only meaningful against the working tree, which is the only
       // view being compared with anything at all.
       if (revision.kind == RevisionKind.workingTree) {
@@ -1234,6 +1286,10 @@ class ExplorerState extends ChangeNotifier {
         if (!diff.isEmpty) _fileDiff = diff;
       }
       _error = null;
+    } on RequestCancelled {
+      // Something else is being looked at now; that request's answer would
+      // be drawn over whatever replaced it.
+      return;
     } on GitWorkerException catch (failure) {
       _error = failure.message;
     }
@@ -1255,8 +1311,19 @@ class ExplorerState extends ChangeNotifier {
     if (_blameFor == key) return;
     _blameFor = key;
     try {
-      _blame = await _git.blame(repositoryPath, revision, path);
+      _blame = await _onlyOne(
+        'blame',
+        (handle) => _git.blame(
+          repositoryPath,
+          revision,
+          path,
+          cancelHandle: handle,
+        ),
+      );
       _error = null;
+    } on RequestCancelled {
+      // A blame for a file nobody is looking at any more.
+      return;
     } on GitWorkerException catch (failure) {
       _error = failure.message;
     }

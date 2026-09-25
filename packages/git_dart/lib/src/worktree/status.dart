@@ -1,6 +1,7 @@
 
 import 'package:path/path.dart' as p;
 
+import '../cancellation.dart';
 import '../diff/tree_diff.dart';
 import '../fs/git_fs.dart';
 import '../index/git_index.dart';
@@ -118,6 +119,7 @@ RepositoryStatus statusOf(
   bool detectRenames = true,
   int renameThreshold = 50,
   int renameLimit = 1000,
+  Cancellation? cancel,
 }) {
   final workTree = repo.workTree;
   if (workTree == null) {
@@ -210,6 +212,9 @@ RepositoryStatus statusOf(
   // ---- the index against the working tree ---------------------------------
 
   for (final entry in indexByPath.values) {
+    // One tracked file is the unit, and this is the half of status that
+    // reads and hashes files: the expensive half, and the one worth leaving.
+    checkCancelled(cancel, 'the status walk');
     if (conflicted.contains(entry.path)) continue;
     // A skip-worktree entry is one the working tree is not expected to hold,
     // which is the whole of what sparse checkout does. Comparing it against

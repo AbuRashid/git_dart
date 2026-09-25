@@ -107,7 +107,16 @@ void main() {
     git(['branch', 'side']);
   });
 
-  tearDownAll(() => scratch.deleteSync(recursive: true));
+  tearDownAll(() {
+    try {
+      scratch.deleteSync(recursive: true);
+    } on FileSystemException {
+      // A worker isolate may still hold a pack open for a moment, and on
+      // Windows an open file cannot be deleted. The directory is the
+      // system's temporary one; leaving it is not worth failing a suite that
+      // has already made its point.
+    }
+  });
 
   group('the persisted list', () {
     late RepositoryStore store;
@@ -1460,6 +1469,94 @@ void main() {
         expect(out(path, ['rev-parse', 'side']), before);
         expect(out(path, ['symbolic-ref', '--short', 'HEAD']), 'side');
         expect(out(path, ['status', '--porcelain']), isEmpty);
+      });
+    });
+
+    group('cancelling a read', () {
+      /// A repository with enough history that a walk of it takes long
+      /// enough to be cancelled part-way rather than winning the race.
+      String longHistory(String name, {int commits = 120}) {
+        final path = p.join(scratch.path, name);
+        Directory(path).createSync(recursive: true);
+        git(['init', '-q', '-b', 'main'], cwd: path);
+        git(['config', 'user.name', 'A'], cwd: path);
+        git(['config', 'user.email', 'a@x'], cwd: path);
+        final lines = <String>[];
+        for (var i = 0; i < commits; i++) {
+          lines.add('line from commit $i');
+          File(p.join(path, 'a.txt')).writeAsStringSync('${lines.join('\n')}\n');
+          git(['add', '-A'], cwd: path);
+          git(['commit', '-q', '-m', 'commit $i'], cwd: path);
+        }
+        return path;
+      }
+
+      test('a cancelled request stops, and the worker answers the next one',
+          timeout: const Timeout(Duration(minutes: 3)), () async {
+        final path = longHistory('cancel-history');
+        await service.open(path, 'repo');
+
+        final request = service.cancellable<List<CommitData>>(
+          (handle) => service.history(path, limit: 100000, cancelHandle: handle),
+        );
+        // Cancelled immediately: the flag is a word of memory the worker
+        // reads between commits, so it does not have to wait for the walk to
+        // finish to be told.
+        request.cancel();
+
+        await expectLater(request.result, throwsA(isA<RequestCancelled>()));
+
+        // The point of cancelling rather than disposing: the worker is still
+        // there, with the repository still open.
+        final summary = await service.open(path, 'repo');
+        expect(summary.available, isTrue);
+        final history = await service.history(path, limit: 10);
+        expect(history, hasLength(10));
+      });
+
+      test('cancelling after the answer arrives changes nothing',
+          timeout: const Timeout(Duration(minutes: 2)), () async {
+        final path = longHistory('cancel-late', commits: 5);
+        await service.open(path, 'repo');
+
+        final request = service.cancellable<List<CommitData>>(
+          (handle) => service.history(path, limit: 100, cancelHandle: handle),
+        );
+        final history = await request.result;
+        expect(history, hasLength(5));
+
+        // The flag has been released by now; saying stop to something that
+        // already stopped must not throw or corrupt anything.
+        request.cancel();
+        expect(await service.history(path, limit: 5), hasLength(5));
+      });
+
+      test('a cancelled read leaves the repository untouched',
+          timeout: const Timeout(Duration(minutes: 3)), () async {
+        final path = longHistory('cancel-clean', commits: 60);
+        await service.open(path, 'repo');
+        final before = git(['rev-parse', 'HEAD'], cwd: path).trim();
+        final indexBefore =
+            File(p.join(path, '.git', 'index')).readAsBytesSync();
+
+        final request = service.cancellable<StagingArea>(
+          (handle) => service.staging(path),
+        );
+        request.cancel();
+        // Staging is quick enough that it may well finish first; either
+        // outcome is fine, and neither may have written anything.
+        try {
+          await request.result;
+        } on RequestCancelled {
+          // Also fine.
+        }
+
+        expect(git(['rev-parse', 'HEAD'], cwd: path).trim(), before);
+        expect(
+          File(p.join(path, '.git', 'index')).readAsBytesSync(),
+          indexBefore,
+        );
+        expect(git(['status', '--porcelain'], cwd: path), isEmpty);
       });
     });
 

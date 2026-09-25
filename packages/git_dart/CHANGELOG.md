@@ -2,6 +2,13 @@
 
 ## 0.4.0
 
+- Long reads can be told to stop. `Cancellation` is asked between units of
+  work — one commit, one file — by `log`, `status`, `blame` and
+  `fileHistory`, which throw `CancelledException` rather than returning a
+  short answer that cannot be told from a complete one. Nothing here becomes
+  interruptible: these calls are synchronous and hold their thread, so what
+  this buys is work that stops at the next boundary instead of running to the
+  end for an answer nobody wants.
 - An object's kind and size can be asked for without building it:
   `ObjectStore.statObject`, and `readRawUpTo` / `Repository.readFileUpTo`,
   which refuse an object larger than a given bound and say how large it is.

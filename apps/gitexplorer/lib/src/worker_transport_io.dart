@@ -9,7 +9,9 @@ import 'dart:async';
 import 'dart:isolate';
 
 import 'package:flutter/services.dart';
+import 'package:git_dart/git_dart.dart' as git;
 
+import 'cancel_flag.dart';
 import 'git_worker.dart';
 import 'worker_transport.dart';
 
@@ -45,9 +47,13 @@ void gitWorkerMain((SendPort, RootIsolateToken) args) {
       final result = worker.handle(
         message.request,
         onProgress: (text) => toMain.send(WorkerProgress(message.id, text)),
+        cancel: cancellationFor(message.cancelHandle),
       );
       final value = result is Future ? await result : result;
       toMain.send(WorkerReply(message.id, value, null));
+    } on git.CancelledException {
+      // Abandoned, which the other side asked for: an outcome, not a fault.
+      toMain.send(WorkerReply(message.id, null, null, cancelled: true));
     } catch (error) {
       // A failure is a reply, not a crash.
       toMain.send(WorkerReply(message.id, null, error.toString()));
@@ -85,6 +91,10 @@ class IsolateWorkerTransport implements WorkerTransport {
       final completer = _pending.remove(message.id);
       _progress.remove(message.id);
       if (completer == null) return;
+      if (message.cancelled) {
+        completer.completeError(const RequestCancelled());
+        return;
+      }
       if (message.error != null) {
         completer.completeError(GitWorkerException(message.error!));
       } else {
@@ -106,12 +116,16 @@ class IsolateWorkerTransport implements WorkerTransport {
   }
 
   @override
-  Future<Object?> send(GitRequest request, {void Function(String)? onProgress}) {
+  Future<Object?> send(
+    GitRequest request, {
+    void Function(String)? onProgress,
+    int cancelHandle = 0,
+  }) {
     final id = _nextId++;
     final completer = Completer<Object?>();
     _pending[id] = completer;
     if (onProgress != null) _progress[id] = onProgress;
-    _toWorker.send(WorkerEnvelope(id, request));
+    _toWorker.send(WorkerEnvelope(id, request, cancelHandle: cancelHandle));
     return completer.future;
   }
 

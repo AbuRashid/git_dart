@@ -17,6 +17,7 @@ import 'dart:typed_data';
 import 'package:git_dart/git_dart.dart' as git;
 import 'package:path/path.dart' as p;
 
+import 'cancel_flag.dart';
 import 'credential_store.dart';
 import 'generated/tokens.dart';
 import 'models.dart';
@@ -522,14 +523,27 @@ class Refresh extends GitRequest {
 class WorkerEnvelope {
   final int id;
   final GitRequest request;
-  const WorkerEnvelope(this.id, this.request);
+
+  /// Where the worker can watch for this request being abandoned, or zero
+  /// when nobody will abandon it. An address rather than an object: it has to
+  /// mean the same thing in the isolate that reads it.
+  final int cancelHandle;
+
+  const WorkerEnvelope(this.id, this.request, {this.cancelHandle = 0});
 }
 
 class WorkerReply {
   final int id;
   final Object? value;
   final String? error;
-  const WorkerReply(this.id, this.value, this.error);
+
+  /// Whether the work stopped because it was abandoned, rather than because
+  /// anything went wrong. A cancellation is not a failure and must not be
+  /// reported as one: nobody wants an error about work they themselves
+  /// decided against.
+  final bool cancelled;
+
+  const WorkerReply(this.id, this.value, this.error, {this.cancelled = false});
 }
 
 /// Commentary on a request that is still being worked out - a clone or a
@@ -557,7 +571,26 @@ class GitWorker {
   final _repositories = <String, git.Repository>{};
   final _statuses = <String, Map<String, FileState>>{};
 
-  Object? handle(GitRequest request, {void Function(String)? onProgress}) =>
+  /// What the request being handled may be told to stop by.
+  ///
+  /// Held on the worker rather than threaded through thirty handlers, since
+  /// it belongs to whichever request is running and there is only ever one.
+  git.Cancellation? _cancel;
+
+  Object? handle(
+    GitRequest request, {
+    void Function(String)? onProgress,
+    git.Cancellation? cancel,
+  }) {
+    _cancel = cancel;
+    try {
+      return _dispatch(request, onProgress: onProgress);
+    } finally {
+      _cancel = null;
+    }
+  }
+
+  Object? _dispatch(GitRequest request, {void Function(String)? onProgress}) =>
       switch (request) {
         OpenRepository() => _open(request),
         InitialiseRepository() => _initialise(request),
@@ -655,7 +688,7 @@ class GitWorker {
     }
 
     final head = repo.headCommit;
-    final status = repo.isBare ? null : repo.status();
+    final status = repo.isBare ? null : repo.status(cancel: _cancel);
     final branches = repo.refs.branches.map((r) => r.shortName).toList();
     final stopped = _stoppedIn(repo);
 
@@ -1671,7 +1704,7 @@ class GitWorker {
       identity:
           identity == null ? null : '${identity.name} <${identity.email}>',
       rows: [
-        for (final entry in repo.status().entries)
+        for (final entry in repo.status(cancel: _cancel).entries)
           StatusRow(
             path: entry.path,
             oldPath: entry.oldPath,
@@ -2126,7 +2159,7 @@ class GitWorker {
       );
     }
 
-    final result = git.blame(repo, request.path, start: at);
+    final result = git.blame(repo, request.path, start: at, cancel: _cancel);
     if (result == null) {
       return BlameData(
         path: request.path,
@@ -2270,7 +2303,7 @@ class GitWorker {
     final repo = _repository(request.repositoryPath);
     final commits = <CommitData>[];
 
-    for (final commit in repo.log(limit: request.limit)) {
+    for (final commit in repo.log(limit: request.limit, cancel: _cancel)) {
       commits.add(_toData(commit));
     }
     return commits;
@@ -2322,8 +2355,13 @@ class GitService {
     GitRequest request, {
     void Function(T value)? beforePersist,
     void Function(String)? onProgress,
+    int cancelHandle = 0,
   }) async {
-    final value = await _transport.send(request, onProgress: onProgress) as T;
+    final value = await _transport.send(
+      request,
+      onProgress: onProgress,
+      cancelHandle: cancelHandle,
+    ) as T;
     // A repository that did not exist before this call has to be registered
     // before the persist below, or the very first save after creating one
     // finds nothing to save it under - which is what silently dropped a
@@ -2335,6 +2373,24 @@ class GitService {
     // forgetting one here would mean silently losing whatever it did.
     await persistWorkspace();
     return value;
+  }
+
+  /// Runs a read that a later one can make pointless, and hands back the way
+  /// to say so.
+  ///
+  /// Navigation does this constantly: a tree expanded, a file opened, a blame
+  /// asked for, and then the selection moves before any of them answered.
+  /// Without this the worker finishes all of it — the answers are discarded,
+  /// the work is not (`006`).
+  ///
+  /// The flag outlives the request and is released when it settles, however
+  /// it settles; cancelling after that is harmless and does nothing.
+  ({Future<T> result, void Function() cancel}) cancellable<T>(
+    Future<T> Function(int cancelHandle) run,
+  ) {
+    final flag = newCancelFlag();
+    final result = run(flag.handle).whenComplete(flag.dispose);
+    return (result: result, cancel: flag.cancel);
   }
 
   Future<RepositorySummary> open(String path, String name) =>
@@ -2357,16 +2413,21 @@ class GitService {
   Future<List<EntryData>> directory(
     String repository,
     Revision revision,
-    String path,
-  ) =>
-      _ask(LoadDirectory(repository, revision, path));
+    String path, {
+    int cancelHandle = 0,
+  }) =>
+      _ask(
+        LoadDirectory(repository, revision, path),
+        cancelHandle: cancelHandle,
+      );
 
   Future<FileContent> file(
     String repository,
     Revision revision,
-    String path,
-  ) =>
-      _ask(LoadFile(repository, revision, path));
+    String path, {
+    int cancelHandle = 0,
+  }) =>
+      _ask(LoadFile(repository, revision, path), cancelHandle: cancelHandle);
 
   Future<FileDiff> fileDiff(
     String repository,
@@ -2378,9 +2439,10 @@ class GitService {
   Future<BlameData> blame(
     String repository,
     Revision revision,
-    String path,
-  ) =>
-      _ask(LoadBlame(repository, revision, path));
+    String path, {
+    int cancelHandle = 0,
+  }) =>
+      _ask(LoadBlame(repository, revision, path), cancelHandle: cancelHandle);
 
   Future<SubmoduleData> submodule(
     String repository,
@@ -2389,8 +2451,15 @@ class GitService {
   ) =>
       _ask(LoadSubmodule(repository, revision, path));
 
-  Future<List<CommitData>> history(String repository, {int limit = 100}) =>
-      _ask(LoadHistory(repository, limit: limit));
+  Future<List<CommitData>> history(
+    String repository, {
+    int limit = 100,
+    int cancelHandle = 0,
+  }) =>
+      _ask(
+        LoadHistory(repository, limit: limit),
+        cancelHandle: cancelHandle,
+      );
 
   Future<({CommitData commit, List<ChangeData> changes})> commit(
     String repository,
@@ -2693,6 +2762,17 @@ class GitService {
   Future<void> refresh(String repository) => _ask(Refresh(repository));
 
   void dispose() => _transport.dispose();
+}
+
+/// Thrown in place of an answer for a read that was abandoned.
+///
+/// Separate from [GitWorkerException] because it is not a failure: the caller
+/// asked for this, and the only correct handling is to carry on.
+class RequestCancelled implements Exception {
+  const RequestCancelled();
+
+  @override
+  String toString() => 'the request was cancelled';
 }
 
 class GitWorkerException implements Exception {

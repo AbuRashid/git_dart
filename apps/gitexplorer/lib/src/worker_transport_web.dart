@@ -13,6 +13,9 @@ library;
 
 import 'dart:async';
 
+import 'package:git_dart/git_dart.dart' as git;
+
+import 'cancel_flag.dart';
 import 'git_worker.dart';
 import 'worker_transport.dart';
 
@@ -25,15 +28,25 @@ class InPlaceWorkerTransport implements WorkerTransport {
   Future<void> start() async {}
 
   @override
-  Future<Object?> send(GitRequest request, {void Function(String)? onProgress}) async {
+  Future<Object?> send(
+    GitRequest request, {
+    void Function(String)? onProgress,
+    int cancelHandle = 0,
+  }) async {
     try {
       // Awaited whether or not it is a future, so a synchronous failure
       // arrives the same way an asynchronous one does. There is no
       // serialisation boundary here at all - the same thread is asking and
       // answering - so progress is just the same callback handed straight
       // through.
-      final result = _worker.handle(request, onProgress: onProgress);
+      final result = _worker.handle(
+        request,
+        onProgress: onProgress,
+        cancel: cancellationFor(cancelHandle),
+      );
       return result is Future ? await result : result;
+    } on git.CancelledException {
+      throw const RequestCancelled();
     } catch (error) {
       // The same contract as the isolate: a failure is a reply.
       throw GitWorkerException(error.toString());

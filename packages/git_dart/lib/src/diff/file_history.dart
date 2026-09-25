@@ -16,6 +16,7 @@ library;
 
 import 'dart:collection';
 
+import '../cancellation.dart';
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/tree.dart';
@@ -67,6 +68,7 @@ Iterable<FileHistoryEntry> fileHistory(
   int? limit,
   bool follow = true,
   int maxCommits = 50000,
+  Cancellation? cancel,
 }) sync* {
   final from = start ?? repository.headId;
   if (from == null) return;
@@ -94,6 +96,7 @@ Iterable<FileHistoryEntry> fileHistory(
   var walked = 0;
 
   while (queue.isNotEmpty && walked < maxCommits) {
+    checkCancelled(cancel, "the file's history walk");
     final pending = queue.first;
     queue.remove(pending);
     walked += 1;

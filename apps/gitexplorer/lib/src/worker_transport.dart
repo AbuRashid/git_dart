@@ -31,7 +31,13 @@ abstract interface class WorkerTransport {
   /// waiting on a network. Most requests never call it at all, which is why
   /// this is a side channel rather than part of the reply: the reply is the
   /// answer, this is commentary while the answer is still being worked out.
-  Future<Object?> send(GitRequest request, {void Function(String)? onProgress});
+  /// [cancelHandle] names a flag the worker watches while it works, from
+  /// `newCancelFlag`. Zero means this request will not be cancelled.
+  Future<Object?> send(
+    GitRequest request, {
+    void Function(String)? onProgress,
+    int cancelHandle = 0,
+  });
 
   void dispose();
 }

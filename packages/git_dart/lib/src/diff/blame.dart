@@ -14,6 +14,7 @@
 /// question git itself answers several ways.
 library;
 
+import '../cancellation.dart';
 import '../object_id.dart';
 import '../objects/commit.dart';
 import '../objects/git_object.dart';
@@ -93,6 +94,7 @@ Blame? blame(
   String path, {
   ObjectId? start,
   int maxCommits = 4096,
+  Cancellation? cancel,
 }) {
   final from = start ?? repository.headId;
   if (from == null) return null;
@@ -123,6 +125,8 @@ Blame? blame(
   var examined = 0;
 
   while (pending.isNotEmpty && examined < maxCommits) {
+    // One commit examined is the unit.
+    checkCancelled(cancel, 'the blame walk');
     examined += 1;
 
     final parent = current.parents.isEmpty ? null : current.parents.first;
