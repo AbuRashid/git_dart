@@ -84,6 +84,19 @@ void buildHistory() {
   }
 }
 
+/// Clears the read-only bit git puts on a commit-graph.
+///
+/// git writes the file 0444 on every platform, so rewriting it to corrupt it
+/// is refused until the bit goes. Each platform spells that differently, and
+/// neither spelling exists on the other.
+void _makeWritable(String path) {
+  if (Platform.isWindows) {
+    Process.runSync('attrib', ['-R', path]);
+  } else {
+    Process.runSync('chmod', ['u+w', path]);
+  }
+}
+
 void main() {
   setUp(() {
     _clock = 1700000000;
@@ -216,12 +229,7 @@ void main() {
       final bytes = File(graphPath()).readAsBytesSync();
       bytes[4] = 99; // an impossible version
       final broken = File(graphPath());
-      // The graph is written read-only on Windows, where `attrib`
-      // clears the bit; on every other system there is no such bit and
-      // no such command.
-      if (Platform.isWindows) {
-        Process.runSync('attrib', ['-R', graphPath()]);
-      }
+      _makeWritable(graphPath());
       broken.writeAsBytesSync(bytes);
 
       // A cache that cannot be read is a cache that is not used. Refusing to
@@ -302,12 +310,7 @@ void main() {
       repo.close();
 
       // git's, from a graph it wrote itself.
-      // The graph is written read-only on Windows, where `attrib`
-      // clears the bit; on every other system there is no such bit and
-      // no such command.
-      if (Platform.isWindows) {
-        Process.runSync('attrib', ['-R', graphPath()]);
-      }
+      _makeWritable(graphPath());
       File(graphPath()).deleteSync();
       git(['commit-graph', 'write', '--reachable']);
 
