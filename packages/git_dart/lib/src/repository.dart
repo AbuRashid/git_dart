@@ -32,6 +32,29 @@ import 'worktree/filters.dart';
 import 'worktree/ignore.dart';
 import 'worktree/status.dart';
 
+/// Thrown when a repository names its objects some way this library cannot
+/// read — today, anything but SHA-1.
+///
+/// Git records the choice as `extensions.objectFormat`, and it reaches every
+/// layer at once: the width of an object name, the hash that produces it, the
+/// checksums on packs and indexes, and the ids inside deltas. There is no
+/// partial support to offer, so the repository is turned away when it is
+/// opened rather than at whichever read happens to look at an id first.
+class UnsupportedObjectFormatException implements Exception {
+  /// The git directory that was being opened.
+  final String gitDirectory;
+
+  /// The format as the repository's config spells it, such as `sha256`.
+  final String format;
+
+  const UnsupportedObjectFormatException(this.gitDirectory, this.format);
+
+  @override
+  String toString() =>
+      'the repository at $gitDirectory keeps its objects in the $format '
+      'format, which this library does not read; it reads sha1 repositories';
+}
+
 /// A repository: an object store, a ref namespace over it, and — unless bare —
 /// an index and a working tree.
 class Repository {
@@ -144,6 +167,17 @@ class Repository {
     // The store asks at the moment of a move, so the timestamp is the move's
     // own and a config edited mid-session is picked up.
     refs.identityFor = repository.identityFromConfig;
+
+    // Every object name this library builds is twenty bytes wide, so a
+    // repository whose objects are named some other way opens, is walked
+    // into, and is half-read before anything notices. It is refused here, by
+    // name, rather than surfacing later as a puzzling complaint about the
+    // length of a perfectly good object id.
+    final format = repository.config['extensions.objectformat'];
+    if (format != null && format.toLowerCase() != 'sha1') {
+      repository.close();
+      throw UnsupportedObjectFormatException(gitDirectory, format);
+    }
     return repository;
   }
 

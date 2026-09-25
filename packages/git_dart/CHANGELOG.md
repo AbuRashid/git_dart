@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+- Index version 4 is read. Its paths are prefix-compressed against the entry
+  before them — a count of bytes to drop, in git's own variable-width
+  encoding, then the rest — and entries carry no padding. A repository git
+  wrote with `index.version = 4`, or converted with `update-index
+  --index-version 4`, previously refused every index-dependent operation,
+  status among them. Writing still produces version 2, or 3 where a flag
+  needs it, which git reads back unchanged.
+- A repository whose `extensions.objectFormat` is not `sha1` is refused when
+  it is opened, with `UnsupportedObjectFormatException` naming the format.
+  Such a repository used to open and then fail at the first object id read,
+  complaining about the length of an id that was perfectly good. Reading
+  SHA-256 repositories is still not supported; this makes the refusal say so.
+
 ## 0.3.1
 
 - New `abortApply`, which abandons a cherry-pick or revert that stopped on

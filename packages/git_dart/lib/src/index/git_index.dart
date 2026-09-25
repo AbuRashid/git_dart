@@ -139,17 +139,13 @@ class GitIndex {
     if (version < 2 || version > 4) {
       throw FormatException('unsupported index version $version');
     }
-    if (version == 4) {
-      // Version 4 prefix-compresses paths against the previous entry and drops
-      // the padding. Refused rather than guessed: a half-read index would
-      // stage the wrong paths.
-      throw const FormatException(
-        'index version 4 (path compression) is not implemented',
-      );
-    }
     final count = data.getUint32(8);
 
     final entries = <IndexEntry>[];
+    // Version 4 spells each path as "drop this many bytes from the end of the
+    // one before, then these", so the previous entry's bytes are kept to
+    // rebuild the next from.
+    var previousPath = Uint8List(0);
     var at = 12;
     for (var i = 0; i < count; i++) {
       final start = at;
@@ -186,23 +182,46 @@ class GitIndex {
         skipWorktree = extra & 0x4000 != 0;
       }
 
-      // 0xfff means "at least 0xfff"; the true length is found by looking for
-      // the terminator.
-      final nul = bytes.indexOf(0, at);
-      if (nul < 0) {
-        throw const FormatException('index entry path is not NUL-terminated');
-      }
-      if (nameLength == 0x0fff) nameLength = nul - at;
-      final path = utf8.decode(
-        bytes.sublist(at, at + nameLength),
-        allowMalformed: true,
-      );
-      at += nameLength;
+      final Uint8List pathBytes;
+      if (version == 4) {
+        // How much of the previous path to drop from its end, then the rest
+        // of this one. Version 4 pads nothing: the next entry begins right
+        // after the terminator.
+        final strip = _decodeVarint(bytes, at);
+        at = strip.after;
+        if (strip.value > previousPath.length) {
+          throw FormatException(
+            'an index entry drops ${strip.value} bytes from a path of '
+            '${previousPath.length}',
+          );
+        }
+        final nul = bytes.indexOf(0, at);
+        if (nul < 0) {
+          throw const FormatException('index entry path is not NUL-terminated');
+        }
+        final kept = previousPath.length - strip.value;
+        pathBytes = Uint8List(kept + (nul - at))
+          ..setRange(0, kept, previousPath)
+          ..setRange(kept, kept + (nul - at), bytes, at);
+        at = nul + 1;
+      } else {
+        // 0xfff means "at least 0xfff"; the true length is found by looking
+        // for the terminator.
+        final nul = bytes.indexOf(0, at);
+        if (nul < 0) {
+          throw const FormatException('index entry path is not NUL-terminated');
+        }
+        if (nameLength == 0x0fff) nameLength = nul - at;
+        pathBytes = Uint8List.sublistView(bytes, at, at + nameLength);
+        at += nameLength;
 
-      // Entries are padded so each begins on an eight-byte boundary, with
-      // between one and eight NULs — never zero, so the path is always
-      // terminated.
-      at = start + ((at - start + 8) & ~7);
+        // Entries are padded so each begins on an eight-byte boundary, with
+        // between one and eight NULs — never zero, so the path is always
+        // terminated.
+        at = start + ((at - start + 8) & ~7);
+      }
+      previousPath = pathBytes;
+      final path = utf8.decode(pathBytes, allowMalformed: true);
 
       entries.add(IndexEntry(
         path: path,
@@ -367,4 +386,27 @@ class GitIndex {
     }
     return grouped;
   }
+}
+
+/// Reads git's own variable-width integer, as `decode_varint` does.
+///
+/// Not the usual continuation encoding: each byte after the first adds one to
+/// what has been read so far before shifting it, so every value has exactly
+/// one spelling and no encoding is wasted on leading zeroes.
+({int value, int after}) _decodeVarint(Uint8List bytes, int at) {
+  var index = at;
+  if (index >= bytes.length) {
+    throw const FormatException('an index entry ends inside a path length');
+  }
+  var byte = bytes[index++];
+  var value = byte & 0x7f;
+  while (byte & 0x80 != 0) {
+    if (index >= bytes.length) {
+      throw const FormatException('an index entry ends inside a path length');
+    }
+    value += 1;
+    byte = bytes[index++];
+    value = (value << 7) + (byte & 0x7f);
+  }
+  return (value: value, after: index);
 }

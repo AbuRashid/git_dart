@@ -636,8 +636,15 @@ class GitWorker {
     // Discovery walks upwards, so a subdirectory of a repository finds that
     // repository. Nothing nested is ever offered or created
     // (`initialising.a-folder-inside-a-repository-is-never-offered`).
-    if (git.Repository.discover(request.path) == null) {
-      return blank.unavailable(UnavailableReason.notARepository);
+    try {
+      if (git.Repository.discover(request.path) == null) {
+        return blank.unavailable(UnavailableReason.notARepository);
+      }
+    } catch (error) {
+      // A repository the library will not open — one keeping its objects in
+      // a format it cannot read, say. It is a repository, and calling it
+      // something else would send the reader after the wrong problem.
+      return blank.unavailable(UnavailableReason.unreadable, '$error');
     }
 
     final git.Repository repo;
