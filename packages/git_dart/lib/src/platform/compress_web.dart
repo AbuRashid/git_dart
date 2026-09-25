@@ -35,3 +35,13 @@ Uint8List inflateExactly(List<int> bytes, int expectedSize) {
       ? Uint8List.fromList(out)
       : Uint8List.fromList(out.sublist(0, expectedSize));
 }
+
+/// Stops at [limit], and is content with a stream that ends before it.
+Uint8List inflateAtMost(List<int> bytes, int limit) {
+  final all = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+  final input = InputStream(Uint8List.sublistView(all, _zlibHeader));
+  final out = Inflate.buffer(input, limit).getBytes();
+  return out.length <= limit
+      ? Uint8List.fromList(out)
+      : Uint8List.fromList(out.sublist(0, limit));
+}

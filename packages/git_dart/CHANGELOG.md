@@ -2,6 +2,18 @@
 
 ## 0.4.0
 
+- An object's kind and size can be asked for without building it:
+  `ObjectStore.statObject`, and `readRawUpTo` / `Repository.readFileUpTo`,
+  which refuse an object larger than a given bound and say how large it is.
+  Every storage form states the size somewhere small — a loose object in the
+  header at the front of its stream, a packed one in its pack header, a delta
+  in the delta's own — so a caller that will not show a large file no longer
+  has to inflate one to find out. The result is typed: too large, missing and
+  empty are three answers rather than one.
+- A pack's object cache is bounded by bytes rather than by how many objects
+  it holds, and the bound can be set per pack (`PackFile.cacheBytes`,
+  64 MiB by default). Two hundred and fifty-six trees and two hundred and
+  fifty-six video files are not the same amount of memory.
 - `status` pairs staged renames. A move is an addition and a deletion in the
   index, as it is in a tree, and status reported it as two unrelated changes
   while tree diffs had inferred the pairing for releases. `StatusEntry` gains

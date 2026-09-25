@@ -54,7 +54,19 @@ class PackFile {
   /// asks for the same base repeatedly, and re-inflating it each time turns a
   /// linear read into a quadratic one.
   final _cache = <int, ({ObjectKind kind, Uint8List content})>{};
-  static const _cacheLimit = 256;
+
+  /// How much the cache may hold, in bytes of object content.
+  ///
+  /// Counted in bytes rather than in entries because entries are not a
+  /// measure of anything: two hundred and fifty-six tree objects are a few
+  /// megabytes and two hundred and fifty-six blobs from a repository of
+  /// videos are not. The same bound, and the same reasoning, as the one
+  /// `PackIndexer` keeps while it resolves deltas.
+  int cacheBytes = 64 * 1024 * 1024;
+  int _cachedBytes = 0;
+
+  /// How much the cache is holding, for a caller measuring what a read cost.
+  int get cachedBytes => _cachedBytes;
 
   PackFile._(this.packPath, this.index, this._file, this._fileLength);
 
@@ -120,9 +132,106 @@ class PackFile {
         ),
     };
 
-    if (_cache.length >= _cacheLimit) _cache.clear();
-    _cache[offset] = result;
+    _remember(offset, result);
     return result;
+  }
+
+  /// Keeps [result] if it is worth keeping, dropping what is already there
+  /// when the budget is reached.
+  ///
+  /// An object larger than the whole budget is not cached at all: keeping it
+  /// would evict everything else to hold one thing, which is the opposite of
+  /// what the cache is for.
+  void _remember(int offset, ({ObjectKind kind, Uint8List content}) result) {
+    final size = result.content.length;
+    if (size > cacheBytes) return;
+    if (_cachedBytes + size > cacheBytes) {
+      _cache.clear();
+      _cachedBytes = 0;
+    }
+    _cache[offset] = result;
+    _cachedBytes += size;
+  }
+
+  /// What the object at [offset] is and how big it will be, without
+  /// reconstructing it.
+  ///
+  /// A stored object says both in its pack header. A delta says how long its
+  /// result will be in the delta's own header, which is small and at the
+  /// front, so reading it costs the delta rather than the object; its kind is
+  /// its base's, which is one more header walk.
+  ({ObjectKind kind, int size}) statAtOffset(int offset) {
+    final cached = _cache[offset];
+    if (cached != null) {
+      return (kind: cached.kind, size: cached.content.length);
+    }
+
+    final header = _readObjectHeader(offset);
+    switch (header.type) {
+      case _PackedType.offsetDelta:
+      case _PackedType.referenceDelta:
+        // The delta's header holds the source and target sizes as the first
+        // two varints, so only as much of it as holds them is inflated.
+        final head = _inflateAtMostAt(
+          header.dataOffset,
+          header.size,
+          _deltaHeaderBytes,
+        );
+        var at = 0;
+        int varint() {
+          var value = 0;
+          var shift = 0;
+          int byte;
+          do {
+            if (at >= head.length) {
+              throw FormatException(
+                'the delta at $offset in $packPath has no target size',
+              );
+            }
+            byte = head[at++];
+            value |= (byte & 0x7f) << shift;
+            shift += 7;
+          } while (byte & 0x80 != 0);
+          return value;
+        }
+
+        varint(); // the base's size, which is not what is being asked
+        final targetSize = varint();
+        final base = header.type == _PackedType.offsetDelta
+            ? statAtOffset(header.baseOffset!)
+            : _statBaseByName(header.baseName!);
+        return (kind: base.kind, size: targetSize);
+      case _PackedType.none:
+      case _PackedType.reserved:
+        throw FormatException(
+          'reserved pack object type ${header.type.code} at $offset',
+        );
+      default:
+        return (kind: header.type.kind!, size: header.size);
+    }
+  }
+
+  /// What the object named [id] is and how big it is, or null when this pack
+  /// does not hold it.
+  ({ObjectKind kind, int size})? stat(ObjectId id) {
+    final offset = index.offsetOf(id);
+    return offset == null ? null : statAtOffset(offset);
+  }
+
+  /// Enough of a delta to hold two varints, generously.
+  static const _deltaHeaderBytes = 32;
+
+  ({ObjectKind kind, int size}) _statBaseByName(ObjectId name) {
+    final inThisPack = stat(name);
+    if (inThisPack != null) return inThisPack;
+    final resolve = externalBase;
+    if (resolve == null) {
+      throw FormatException(
+        'delta base $name is outside $packPath and no resolver was given',
+      );
+    }
+    final base = resolve(name);
+    return (kind: base.kind, size: base.content.length);
   }
 
   /// Resolves a `ref-delta` base. The base may be outside this pack, which is
@@ -310,6 +419,18 @@ class PackFile {
         'the object at $offset in $packPath: ${error.message}',
       );
     }
+  }
+
+  /// Inflates no more than [limit] bytes of the stream at [offset], whose
+  /// whole length would be [expectedSize].
+  Uint8List _inflateAtMostAt(int offset, int expectedSize, int limit) {
+    final bound = expectedSize + (expectedSize >> 10) + 64;
+    final available = _fileLength - offset;
+    if (available <= 0) {
+      throw FormatException('$packPath ends before the object at $offset');
+    }
+    final slab = _readAt(offset, _min(_min(bound, available), limit * 8 + 64));
+    return inflateAtMost(slab, limit);
   }
 
   static int _min(int a, int b) => a < b ? a : b;

@@ -33,6 +33,19 @@ class LooseObjectStore {
     return GitObject.split(inflated);
   }
 
+  /// What the object says it is, without inflating the whole of it.
+  ///
+  /// The header sits at the front of the compressed stream, so only as much
+  /// as holds it is expanded: the difference between learning that a blob is
+  /// two hundred megabytes and allocating two hundred megabytes to find out.
+  ({ObjectKind kind, int size})? stat(ObjectId id) {
+    final file = fs.file(pathFor(id));
+    if (!file.existsSync()) return null;
+    // `<kind> <decimal size>\0`: a kind is at most six characters and a size
+    // at most twenty digits, so this is generous.
+    return parseObjectHeader(inflateAtMost(file.readAsBytesSync(), 64));
+  }
+
   /// Writes [object] and returns its name. Writing an object that already
   /// exists is a no-op: identical content has one name, so there is nothing
   /// to overwrite.

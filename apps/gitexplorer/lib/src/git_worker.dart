@@ -2023,22 +2023,32 @@ class GitWorker {
       }
       bytes = file.readAsBytesSync();
     } else {
-      bytes = repo.readFile(request.path, revision: revision);
-      if (bytes == null) {
-        return FileContent(
-          path: request.path,
-          size: 0,
-          isBinary: false,
-          notLoaded: 'the file is not in $revision',
-        );
-      }
-      if (bytes.length > _maximumPreview) {
-        return FileContent(
-          path: request.path,
-          size: bytes.length,
-          isBinary: false,
-          notLoaded: 'the file is larger than 1 MB',
-        );
+      // Asked with the limit rather than asked and then measured. A file over
+      // the limit is not going to be shown, and reading it to discover that
+      // inflates and holds however large it is, to no purpose — the working
+      // tree branch above has always checked the length first, and this is
+      // the same check where the length lives in a header.
+      switch (repo.readFileUpTo(
+        request.path,
+        _maximumPreview,
+        revision: revision,
+      )) {
+        case git.ObjectMissing():
+          return FileContent(
+            path: request.path,
+            size: 0,
+            isBinary: false,
+            notLoaded: 'the file is not in $revision',
+          );
+        case git.ObjectTooLarge(:final size):
+          return FileContent(
+            path: request.path,
+            size: size,
+            isBinary: false,
+            notLoaded: 'the file is larger than 1 MB',
+          );
+        case git.ObjectRead(:final content):
+          bytes = content;
       }
     }
 

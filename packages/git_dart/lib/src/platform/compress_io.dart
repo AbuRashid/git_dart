@@ -33,3 +33,25 @@ Uint8List inflateExactly(List<int> bytes, int expectedSize) {
       ? result
       : Uint8List.sublistView(result, 0, expectedSize);
 }
+
+/// Stops at [limit], and is content with a stream that ends before it.
+Uint8List inflateAtMost(List<int> bytes, int limit) {
+  final filter = RawZLibFilter.inflateFilter();
+  final out = BytesBuilder(copy: false);
+
+  filter.process(
+    bytes is Uint8List ? bytes : Uint8List.fromList(bytes),
+    0,
+    bytes.length,
+  );
+  List<int>? produced;
+  while ((produced = filter.processed(flush: false)) != null) {
+    out.add(produced!);
+    if (out.length >= limit) break;
+  }
+
+  final result = out.takeBytes();
+  return result.length <= limit
+      ? result
+      : Uint8List.sublistView(result, 0, limit);
+}

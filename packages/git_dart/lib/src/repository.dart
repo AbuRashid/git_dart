@@ -726,6 +726,30 @@ class Repository {
     return objects.readTyped<Blob>(entry.id).content;
   }
 
+  /// [readFile], refused when the file is larger than [maxBytes].
+  ///
+  /// For a caller that will not show what it cannot fit — a preview pane, a
+  /// search that skips large files — reading the whole blob to discover it is
+  /// too large is the expensive half of the work done for nothing. The size
+  /// comes from the object's header, so an oversized file is never inflated,
+  /// and the refusal says how big it is.
+  ///
+  /// [ObjectMissing] covers both a path that is not there and one that is a
+  /// directory: neither is a file to read.
+  ObjectReadResult readFileUpTo(
+    String path,
+    int maxBytes, {
+    String revision = 'HEAD',
+  }) {
+    final id = resolve(revision);
+    if (id == null) return const ObjectMissing();
+    final tree = treeOf(id);
+    if (tree == null) return const ObjectMissing();
+    final entry = lookup(tree, path);
+    if (entry == null || entry.mode.isTree) return const ObjectMissing();
+    return objects.readRawUpTo(entry.id, maxBytes);
+  }
+
   // ---- the walk -----------------------------------------------------------
 
   /// Commits reachable from [start], newest first by committer date.

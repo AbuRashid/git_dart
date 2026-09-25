@@ -39,3 +39,14 @@ Uint8List inflate(List<int> bytes) => impl.inflate(bytes);
 /// is ignored rather than being an error.
 Uint8List inflateExactly(List<int> bytes, int expectedSize) =>
     impl.inflateExactly(bytes, expectedSize);
+
+/// Inflates at most [limit] bytes of a zlib stream, stopping there and
+/// ignoring whatever follows.
+///
+/// Unlike [inflateExactly] this does not know, and does not ask, how long the
+/// stream is: a stream that ends sooner returns what there was. It is how an
+/// object's header is read without inflating the object — the difference
+/// between learning that a blob is two hundred megabytes and allocating two
+/// hundred megabytes to find out.
+Uint8List inflateAtMost(List<int> bytes, int limit) =>
+    impl.inflateAtMost(bytes, limit);

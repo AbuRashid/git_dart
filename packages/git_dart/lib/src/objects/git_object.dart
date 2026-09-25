@@ -85,6 +85,27 @@ abstract class GitObject {
   }
 }
 
+/// Reads `<kind> <size>\0` from the front of a stored object.
+///
+/// [prefix] need only hold the header: the content may be absent, cut short,
+/// or all there. Null when the header itself is not complete in what was
+/// given, which is how a caller asks for "enough to know" and finds out
+/// whether it got it.
+({ObjectKind kind, int size})? parseObjectHeader(Uint8List prefix) {
+  final nul = prefix.indexOf(0);
+  if (nul < 0) return null;
+  final header = ascii.decode(prefix.sublist(0, nul));
+  final space = header.indexOf(' ');
+  if (space < 0) {
+    throw FormatException('malformed object header "$header"');
+  }
+  final size = int.tryParse(header.substring(space + 1));
+  if (size == null) {
+    throw FormatException('malformed length in object header "$header"');
+  }
+  return (kind: ObjectKind.byName(header.substring(0, space)), size: size);
+}
+
 Uint8List _framed(ObjectKind kind, Uint8List content) {
   final header = ascii.encode('${kind.name} ${content.length}\x00');
   final out = Uint8List(header.length + content.length)

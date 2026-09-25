@@ -79,6 +79,49 @@ class ObjectStore {
     return null;
   }
 
+  /// What [id] is and how big it is, without materialising it, or null when
+  /// it is not here.
+  ///
+  /// A loose object states both in a header at the front of its compressed
+  /// stream; a packed one states them in its pack header, and a delta states
+  /// how long its result will be in the delta's own. So this costs a read of
+  /// a few dozen bytes where reading the object costs the object — the
+  /// difference between deciding not to show a two-hundred-megabyte blob and
+  /// allocating it in order to decide.
+  ({ObjectKind kind, int size})? statObject(ObjectId id) {
+    final looseObject = loose.stat(id);
+    if (looseObject != null) return looseObject;
+
+    for (final pack in packs) {
+      final packed = pack.stat(id);
+      if (packed != null) return packed;
+    }
+
+    for (final store in alternates) {
+      final borrowed = store.statObject(id);
+      if (borrowed != null) return borrowed;
+    }
+
+    return null;
+  }
+
+  /// [readRaw], refused when the object is larger than [maxBytes].
+  ///
+  /// The size is read from the header first, so an object over the limit is
+  /// never inflated and never allocated. The refusal carries what is known
+  /// about it: "too large to show" and "empty" must not look alike to
+  /// whoever asked.
+  ObjectReadResult readRawUpTo(ObjectId id, int maxBytes) {
+    final stat = statObject(id);
+    if (stat == null) return const ObjectMissing();
+    if (stat.size > maxBytes) {
+      return ObjectTooLarge(kind: stat.kind, size: stat.size);
+    }
+    final raw = readRaw(id);
+    if (raw == null) return const ObjectMissing();
+    return ObjectRead(kind: raw.kind, content: raw.content, size: stat.size);
+  }
+
   /// The parsed object named [id].
   GitObject read(ObjectId id) {
     final raw = readRaw(id);
@@ -223,4 +266,43 @@ class ObjectStore {
       store.close();
     }
   }
+}
+
+/// What a bounded read found: the object, a refusal with its size, or
+/// nothing at all.
+///
+/// Three outcomes rather than a nullable result, because a caller that shows
+/// what it gets must be able to tell an object it may not show from one that
+/// is not there and from one that is genuinely empty. Collapsing those is how
+/// a refusal ends up on screen as a blank file.
+sealed class ObjectReadResult {
+  const ObjectReadResult();
+}
+
+class ObjectRead extends ObjectReadResult {
+  final ObjectKind kind;
+  final Uint8List content;
+
+  /// What the header said, which is what was checked against the limit.
+  final int size;
+
+  const ObjectRead({
+    required this.kind,
+    required this.content,
+    required this.size,
+  });
+}
+
+class ObjectTooLarge extends ObjectReadResult {
+  final ObjectKind kind;
+
+  /// The whole object's size, from its header — the thing worth telling
+  /// someone who has just been told they cannot have it.
+  final int size;
+
+  const ObjectTooLarge({required this.kind, required this.size});
+}
+
+class ObjectMissing extends ObjectReadResult {
+  const ObjectMissing();
 }
