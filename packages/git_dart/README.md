@@ -9,6 +9,11 @@ No `git` binary, no FFI, no `libgit2`. It reads and writes real repositories —
 ones git made, and ones git can read back — on the Dart VM, in Flutter, and in a
 browser.
 
+**See git_dart in action** in the live demo of
+[Git Explorer](https://gitexplorer.manhaj.dev), an application built entirely
+on this library and usable in the browser: it clones real repositories and
+browses, edits, stages and commits them, with no server holding them.
+
 Derived from [`systems/git/v0`](../../specs/git.umsg).
 
 ## What it does

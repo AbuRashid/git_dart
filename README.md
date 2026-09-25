@@ -13,6 +13,11 @@ ssh and `git://`. It runs on the Dart VM, in Flutter, and in a browser.
 explorer that browses, edits, stages, commits, clones, fetches, pulls and pushes,
 on desktop, mobile and the web.
 
+**See git_dart in action** in the
+[live demo](https://gitexplorer.manhaj.dev), which runs the whole application —
+and so the whole library — in the browser: it clones real repositories and
+works on them there, with no server holding them.
+
 ## What is here
 
 | what | where | derived from |
